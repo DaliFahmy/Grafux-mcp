@@ -81,16 +81,7 @@ def _get_project_root() -> Path:
     locally and on Render (/opt/render/project/src/mcp_server.py) the parent
     directory of this file is always the correct project root.
     """
-    result = Path(__file__).resolve().parent
-    # #region agent log
-    import json as _json, time as _time
-    try:
-        with open("debug-c5eccb.log", "a") as _lf:
-            _lf.write(_json.dumps({"sessionId": "c5eccb", "hypothesisId": "A-B-D", "location": "mcp_server.py:_get_project_root", "message": "project root resolved", "data": {"__file__": __file__, "resolved": str(Path(__file__).resolve()), "result": str(result), "cwd": str(Path.cwd())}, "timestamp": int(_time.time() * 1000)}) + "\n")
-    except Exception:
-        pass
-    # #endregion
-    return result
+    return Path(__file__).resolve().parent
 
 
 # ── S3 client cache ───────────────────────────────────────────────────────────
@@ -98,6 +89,37 @@ def _get_project_root() -> Path:
 # when the credentials environment variables change.
 _s3_client_instance: Optional[Any] = None
 _s3_client_creds: Tuple[str, str] = ("", "")
+
+# ── S3 ETag cache ─────────────────────────────────────────────────────────────
+# Maps s3_key → ETag string so we can skip downloading files whose content has
+# not changed since the last sync.  Persisted to data/.s3_etag_cache.json and
+# protected by a lock so concurrent periodic + manual syncs do not race.
+_etag_cache_lock = threading.Lock()
+
+
+def _get_etag_cache_path() -> Path:
+    return _get_project_root() / "data" / ".s3_etag_cache.json"
+
+
+def _load_etag_cache() -> dict:
+    path = _get_etag_cache_path()
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_etag_cache(cache: dict) -> None:
+    path = _get_etag_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(cache), encoding="utf-8")
+        tmp.replace(path)
+    except Exception as e:
+        print(f"[WARN] Could not save ETag cache: {e}", file=sys.stderr)
 
 
 def _get_s3_client() -> Any:
@@ -1118,29 +1140,16 @@ def _sync_tools_from_s3_sync(
 
         s3_client = _get_s3_client()
 
-        print(f"[INFO] Listing S3 objects (bucket={bucket_name}, prefix=users/)")
         paginator = s3_client.get_paginator('list_objects_v2')
         all_objects = []
         for page in paginator.paginate(Bucket=bucket_name, Prefix="users/"):
             all_objects.extend(page.get('Contents', []))
 
         if not all_objects:
-            print("[WARN] No objects found in S3")
             return {"success": True, "message": "No files found in S3", "files_synced": 0}
-
-        print(f"[INFO] Found {len(all_objects)} objects in S3")
 
         data_dir = _get_project_root() / "data"
         data_dir.mkdir(exist_ok=True)
-        print(f"[INFO] Local data directory: {data_dir}")
-        # #region agent log
-        import json as _json2, time as _time2
-        try:
-            with open("debug-c5eccb.log", "a") as _lf2:
-                _lf2.write(_json2.dumps({"sessionId": "c5eccb", "hypothesisId": "B-C", "location": "mcp_server.py:_sync_tools_from_s3_sync", "message": "data_dir resolved", "data": {"data_dir": str(data_dir), "exists": data_dir.exists()}, "timestamp": int(_time2.time() * 1000)}) + "\n")
-        except Exception:
-            pass
-        # #endregion
 
         # Optional pre-clean
         import shutil
@@ -1159,107 +1168,120 @@ def _sync_tools_from_s3_sync(
                     print(f"[WARN] Clean failed: {e}")
 
         files_synced = 0
+        files_skipped = 0
         s3_files: set = set()
-        _logged_keys = 0
 
-        for obj in all_objects:
-            s3_key = obj['Key']
-            if s3_key.endswith('/'):
-                continue
-            if username and username not in s3_key:
-                continue
-            if project and project not in s3_key:
-                continue
-            if '/tools/' not in s3_key:
-                continue
+        with _etag_cache_lock:
+            etag_cache = _load_etag_cache()
 
-            # Strip "users/{user_id}/" prefix → local relative path
-            parts = s3_key.split('/')
-            local_key = '/'.join(parts[2:]) if len(parts) >= 3 and parts[0] == 'users' else s3_key
-            s3_files.add(local_key)
-
-            local_path = data_dir / local_key
-            # #region agent log
-            if _logged_keys < 5:
-                import json as _json3, time as _time3
-                try:
-                    with open("debug-c5eccb.log", "a") as _lf3:
-                        _lf3.write(_json3.dumps({"sessionId": "c5eccb", "hypothesisId": "C-E", "location": "mcp_server.py:sync_loop", "message": "s3 key → local path", "data": {"s3_key": s3_key, "local_key": local_key, "local_path": str(local_path)}, "timestamp": int(_time3.time() * 1000)}) + "\n")
-                except Exception:
-                    pass
-                _logged_keys += 1
-            # #endregion
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                s3_client.download_file(bucket_name, s3_key, str(local_path))
-                files_synced += 1
-                print(f"[INFO] ✓ Downloaded: {s3_key}")
-            except Exception as e:
-                print(f"[ERROR] Download failed ({s3_key}): {e}")
-
-        print(f"[INFO] Synced {files_synced} files from S3")
-
-        # Delete orphaned local files (exist locally but not in S3)
-        files_deleted = 0
-        dirs_deleted = 0
-        tools_paths = []
-        if username and project:
-            tools_paths = [data_dir / username / project / "tools"]
-        elif username:
-            ud = data_dir / username
-            if ud.exists():
-                tools_paths = [p / "tools" for p in ud.iterdir() if p.is_dir()]
-        elif data_dir.exists():
-            for ud in data_dir.iterdir():
-                if ud.is_dir() and not ud.name.startswith('.'):
-                    for pd in ud.iterdir():
-                        if pd.is_dir() and not pd.name.startswith('.'):
-                            tp = pd / "tools"
-                            if tp.exists():
-                                tools_paths.append(tp)
-
-        for tp in tools_paths:
-            if not tp.exists():
-                continue
-            for lf in tp.rglob("*"):
-                if not lf.is_file():
+            for obj in all_objects:
+                s3_key = obj['Key']
+                if s3_key.endswith('/'):
                     continue
+                if username and username not in s3_key:
+                    continue
+                if project and project not in s3_key:
+                    continue
+                if '/tools/' not in s3_key:
+                    continue
+
+                # Strip "users/{user_id}/" prefix → local relative path
+                parts = s3_key.split('/')
+                local_key = '/'.join(parts[2:]) if len(parts) >= 3 and parts[0] == 'users' else s3_key
+                s3_files.add(local_key)
+
+                local_path = data_dir / local_key
+                s3_etag = obj.get('ETag', '').strip('"')
+
+                # Skip download when ETag matches and local file already exists
+                if etag_cache.get(s3_key) == s3_etag and local_path.exists():
+                    files_skipped += 1
+                    continue
+
+                local_path.parent.mkdir(parents=True, exist_ok=True)
                 try:
-                    if lf.relative_to(data_dir).as_posix() not in s3_files:
-                        lf.unlink()
-                        files_deleted += 1
-                        print(f"[INFO] ✓ Deleted orphan: {lf}")
+                    s3_client.download_file(bucket_name, s3_key, str(local_path))
+                    etag_cache[s3_key] = s3_etag
+                    files_synced += 1
+                    print(f"[INFO] ✓ Downloaded (changed): {s3_key}", file=sys.stderr)
                 except Exception as e:
-                    print(f"[ERROR] Delete check failed ({lf}): {e}")
-            for ld in sorted(tp.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-                if ld.is_dir():
+                    print(f"[ERROR] Download failed ({s3_key}): {e}", file=sys.stderr)
+
+            # Delete orphaned local files (exist locally but not in S3)
+            files_deleted = 0
+            dirs_deleted = 0
+            tools_paths = []
+            if username and project:
+                tools_paths = [data_dir / username / project / "tools"]
+            elif username:
+                ud = data_dir / username
+                if ud.exists():
+                    tools_paths = [p / "tools" for p in ud.iterdir() if p.is_dir()]
+            elif data_dir.exists():
+                for ud in data_dir.iterdir():
+                    if ud.is_dir() and not ud.name.startswith('.'):
+                        for pd in ud.iterdir():
+                            if pd.is_dir() and not pd.name.startswith('.'):
+                                tp = pd / "tools"
+                                if tp.exists():
+                                    tools_paths.append(tp)
+
+            for tp in tools_paths:
+                if not tp.exists():
+                    continue
+                for lf in tp.rglob("*"):
+                    if not lf.is_file():
+                        continue
                     try:
-                        if not any(ld.iterdir()):
-                            ld.rmdir()
-                            dirs_deleted += 1
-                    except Exception:
-                        pass
+                        lf_key = lf.relative_to(data_dir).as_posix()
+                        if lf_key not in s3_files:
+                            lf.unlink()
+                            files_deleted += 1
+                            print(f"[INFO] Deleted orphan: {lf}", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[ERROR] Delete check failed ({lf}): {e}", file=sys.stderr)
+                for ld in sorted(tp.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+                    if ld.is_dir():
+                        try:
+                            if not any(ld.iterdir()):
+                                ld.rmdir()
+                                dirs_deleted += 1
+                        except Exception:
+                            pass
 
-        if files_deleted or dirs_deleted:
-            print(f"[INFO] Cleaned {files_deleted} orphaned files, {dirs_deleted} empty dirs")
+            # Remove orphaned ETags from cache
+            orphaned_keys = [k for k in list(etag_cache) if k.startswith("users/") and
+                             '/'.join(k.split('/')[2:]) not in s3_files]
+            for k in orphaned_keys:
+                del etag_cache[k]
 
-        # Reload the tool registry after syncing new files
+            _save_etag_cache(etag_cache)
+
+        print(
+            f"[INFO] Sync complete: {files_synced} downloaded, "
+            f"{files_skipped} unchanged, {files_deleted} deleted",
+            file=sys.stderr,
+        )
+
+        # Only reload plugins when something actually changed on disk
         tools_loaded = 0
-        try:
-            reload_result = bridge.reload_tools()
-            if reload_result.get("success"):
-                tools_loaded = reload_result.get("counts", {}).get("tools", 0)
-        except Exception as e:
-            print(f"[ERROR] Reload after sync failed: {e}")
-            traceback.print_exc()
+        if files_synced or files_deleted:
+            try:
+                reload_result = bridge.reload_tools()
+                if reload_result.get("success"):
+                    tools_loaded = reload_result.get("counts", {}).get("tools", 0)
+            except Exception as e:
+                print(f"[ERROR] Reload after sync failed: {e}", file=sys.stderr)
+                traceback.print_exc()
 
         return {
             "success": True,
             "message": (
-                f"Synced {files_synced} files, deleted {files_deleted} orphans, "
-                f"{tools_loaded} tools loaded"
+                f"Synced {files_synced} files, {files_skipped} unchanged, "
+                f"deleted {files_deleted} orphans, {tools_loaded} tools loaded"
             ),
             "files_synced": files_synced,
+            "files_skipped": files_skipped,
             "files_deleted": files_deleted,
             "dirs_deleted": dirs_deleted,
             "tools_loaded": tools_loaded,
@@ -1332,50 +1354,71 @@ def _sync_single_tool_sync(
             else f"users/{user_id}/{username}/{project}/tools/{tool_name}/"
         )
 
-        print(f"[INFO] Syncing single tool '{tool_name}' from S3 prefix: {prefix}")
+        print(f"[INFO] Checking tool '{tool_name}' at S3 prefix: {prefix}", file=sys.stderr)
 
         data_dir = _get_project_root() / "data"
         data_dir.mkdir(exist_ok=True)
 
         files_synced = 0
+        files_skipped = 0
         paginator = s3_client.get_paginator('list_objects_v2')
-        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            for obj in page.get('Contents', []):
-                s3_key = obj['Key']
-                if s3_key.endswith('/'):
-                    continue
-                # Strip "users/{user_id}/" to get the local relative path
-                parts = s3_key.split('/', 2)
-                local_key = parts[2] if len(parts) == 3 else s3_key
-                local_path = data_dir / local_key
-                local_path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    s3_client.download_file(bucket, s3_key, str(local_path))
-                    files_synced += 1
-                    print(f"[INFO] ✓ Downloaded: {s3_key}")
-                except Exception as e:
-                    print(f"[ERROR] Download failed ({s3_key}): {e}")
 
-        print(f"[INFO] Single-tool sync: {files_synced} files downloaded for '{tool_name}'")
+        with _etag_cache_lock:
+            etag_cache = _load_etag_cache()
 
-        # Reload the tool registry so the new Python module is registered
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get('Contents', []):
+                    s3_key = obj['Key']
+                    if s3_key.endswith('/'):
+                        continue
+                    # Strip "users/{user_id}/" to get the local relative path
+                    parts = s3_key.split('/', 2)
+                    local_key = parts[2] if len(parts) == 3 else s3_key
+                    local_path = data_dir / local_key
+                    s3_etag = obj.get('ETag', '').strip('"')
+
+                    # Skip if unchanged
+                    if etag_cache.get(s3_key) == s3_etag and local_path.exists():
+                        files_skipped += 1
+                        continue
+
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        s3_client.download_file(bucket, s3_key, str(local_path))
+                        etag_cache[s3_key] = s3_etag
+                        files_synced += 1
+                        print(f"[INFO] ✓ Downloaded (changed): {s3_key}", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[ERROR] Download failed ({s3_key}): {e}", file=sys.stderr)
+
+            _save_etag_cache(etag_cache)
+
+        print(
+            f"[INFO] Single-tool sync '{tool_name}': "
+            f"{files_synced} downloaded, {files_skipped} unchanged",
+            file=sys.stderr,
+        )
+
+        # Only reload when something actually changed
         tools_loaded = 0
-        try:
-            reload_result = bridge.reload_tools()
-            if reload_result.get("success"):
-                tools_loaded = reload_result.get("counts", {}).get("tools", 0)
-        except Exception as e:
-            print(f"[ERROR] Reload after single-tool sync failed: {e}")
+        if files_synced:
+            try:
+                reload_result = bridge.reload_tools()
+                if reload_result.get("success"):
+                    tools_loaded = reload_result.get("counts", {}).get("tools", 0)
+            except Exception as e:
+                print(f"[ERROR] Reload after single-tool sync failed: {e}", file=sys.stderr)
 
         return {
             "success": True,
             "files_synced": files_synced,
+            "files_skipped": files_skipped,
             "tools_loaded": tools_loaded,
             "tool_name": tool_name,
         }
 
     except Exception as e:
-        print(f"[ERROR] Single-tool sync error: {e}")
+        print(f"[ERROR] Single-tool sync error: {e}", file=sys.stderr)
         traceback.print_exc()
         return {"success": False, "error": str(e)}
 
@@ -1611,17 +1654,19 @@ async def periodic_sync_task():
         try:
             if SYNC_INTERVAL_SECONDS > 0:
                 await asyncio.sleep(SYNC_INTERVAL_SECONDS)
-                print("[INFO] Periodic sync — downloading tools from S3...")
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(None, _sync_tools_from_s3_sync)
                 if result.get("success"):
-                    print(
-                        f"[INFO] Periodic sync done: "
-                        f"{result.get('files_synced', 0)} files, "
-                        f"{result.get('tools_loaded', 0)} tools"
-                    )
+                    downloaded = result.get('files_synced', 0)
+                    if downloaded or result.get('files_deleted', 0):
+                        print(
+                            f"[INFO] Periodic sync: {downloaded} downloaded, "
+                            f"{result.get('files_skipped', 0)} unchanged, "
+                            f"{result.get('tools_loaded', 0)} tools loaded",
+                            file=sys.stderr,
+                        )
                 else:
-                    print(f"[ERROR] Periodic sync failed: {result.get('error')}")
+                    print(f"[ERROR] Periodic sync failed: {result.get('error')}", file=sys.stderr)
             else:
                 await asyncio.sleep(86400)
         except Exception as e:
