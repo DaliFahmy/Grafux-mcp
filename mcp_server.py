@@ -81,7 +81,16 @@ def _get_project_root() -> Path:
     locally and on Render (/opt/render/project/src/mcp_server.py) the parent
     directory of this file is always the correct project root.
     """
-    return Path(__file__).resolve().parent
+    result = Path(__file__).resolve().parent
+    # #region agent log
+    import json as _json, time as _time
+    try:
+        with open("debug-c5eccb.log", "a") as _lf:
+            _lf.write(_json.dumps({"sessionId": "c5eccb", "hypothesisId": "A-B-D", "location": "mcp_server.py:_get_project_root", "message": "project root resolved", "data": {"__file__": __file__, "resolved": str(Path(__file__).resolve()), "result": str(result), "cwd": str(Path.cwd())}, "timestamp": int(_time.time() * 1000)}) + "\n")
+    except Exception:
+        pass
+    # #endregion
+    return result
 
 
 # ── S3 client cache ───────────────────────────────────────────────────────────
@@ -1124,6 +1133,14 @@ def _sync_tools_from_s3_sync(
         data_dir = _get_project_root() / "data"
         data_dir.mkdir(exist_ok=True)
         print(f"[INFO] Local data directory: {data_dir}")
+        # #region agent log
+        import json as _json2, time as _time2
+        try:
+            with open("debug-c5eccb.log", "a") as _lf2:
+                _lf2.write(_json2.dumps({"sessionId": "c5eccb", "hypothesisId": "B-C", "location": "mcp_server.py:_sync_tools_from_s3_sync", "message": "data_dir resolved", "data": {"data_dir": str(data_dir), "exists": data_dir.exists()}, "timestamp": int(_time2.time() * 1000)}) + "\n")
+        except Exception:
+            pass
+        # #endregion
 
         # Optional pre-clean
         import shutil
@@ -1143,6 +1160,7 @@ def _sync_tools_from_s3_sync(
 
         files_synced = 0
         s3_files: set = set()
+        _logged_keys = 0
 
         for obj in all_objects:
             s3_key = obj['Key']
@@ -1161,6 +1179,16 @@ def _sync_tools_from_s3_sync(
             s3_files.add(local_key)
 
             local_path = data_dir / local_key
+            # #region agent log
+            if _logged_keys < 5:
+                import json as _json3, time as _time3
+                try:
+                    with open("debug-c5eccb.log", "a") as _lf3:
+                        _lf3.write(_json3.dumps({"sessionId": "c5eccb", "hypothesisId": "C-E", "location": "mcp_server.py:sync_loop", "message": "s3 key → local path", "data": {"s3_key": s3_key, "local_key": local_key, "local_path": str(local_path)}, "timestamp": int(_time3.time() * 1000)}) + "\n")
+                except Exception:
+                    pass
+                _logged_keys += 1
+            # #endregion
             local_path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 s3_client.download_file(bucket_name, s3_key, str(local_path))
