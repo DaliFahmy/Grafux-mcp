@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: grafux-mcp
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn mcp_server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: S3_SYNC_INTERVAL
+        value: "300"
+      - key: S3_BUCKET_NAME
+        value: grafux-user-files
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: GCP_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: BRAVE_SEARCH_API_KEY
+        sync: false

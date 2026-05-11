@@ -77,22 +77,11 @@ def _tl_log_warn(msg: str) -> None:
 def _get_project_root() -> Path:
     """Return the repository/project root directory.
 
-    On Render native Python services the layout is:
-        /opt/render/project/src/server/mcp/mcp_server.py
-    Walking up to the directory literally named 'project' gives us the root.
-    Locally the script is at <repo>/server/mcp/mcp_server.py, so we fall back to
-    three levels above the script file.
+    In the standalone repo mcp_server.py lives at the repo root, so both
+    locally and on Render (/opt/render/project/src/mcp_server.py) the parent
+    directory of this file is always the correct project root.
     """
-    script_path = Path(__file__).resolve()
-    current = script_path.parent
-    while current.name != 'project' and current.parent != current:
-        current = current.parent
-    if current.name == 'project':
-        return current
-    if current.name == 'src':
-        return current.parent
-    # Fallback for local dev: three levels up from server/mcp/mcp_server.py → project root
-    return script_path.parent.parent.parent
+    return Path(__file__).resolve().parent
 
 
 # ── S3 client cache ───────────────────────────────────────────────────────────
