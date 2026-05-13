@@ -1,24 +1,106 @@
 services:
+  # ── Grafux-mcp web service ────────────────────────────────────────────────
   - type: web
     name: grafux-mcp
     runtime: python
-    plan: starter
+    plan: standard
     region: oregon
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn mcp_server:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /health
+    branch: main
+    buildCommand: pip install -r requirements.txt && alembic upgrade head
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2 --log-level info
+    healthCheckPath: /api/v1/health/liveness
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
-      - key: S3_SYNC_INTERVAL
-        value: "600"
-      - key: S3_BUCKET_NAME
-        value: grafux-user-files
+      - key: PYTHONDONTWRITEBYTECODE
+        value: "1"
+      - key: PYTHONPATH
+        value: "/opt/render/project/src"
+      - key: SERVICE_NAME
+        value: grafux-mcp
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: DATABASE_URL
+        fromDatabase:
+          name: grafux-mcp-db
+          property: connectionString
+      - key: REDIS_URL
+        sync: false
+      - key: INTERNAL_SERVICE_KEY
+        sync: false
+      - key: BACKEND_INTERNAL_URL
+        sync: false
+      - key: ORCHESTRATOR_INTERNAL_URL
+        sync: false
+      - key: DEVICES_INTERNAL_URL
+        sync: false
+      - key: E2B_API_KEY
+        sync: false
+      - key: COMPOSIO_API_KEY
+        sync: false
       - key: AWS_ACCESS_KEY_ID
         sync: false
       - key: AWS_SECRET_ACCESS_KEY
         sync: false
+      - key: S3_BUCKET_NAME
+        value: grafux-user-files
+      - key: S3_SYNC_INTERVAL
+        value: "600"
       - key: GCP_SERVICE_ACCOUNT_JSON
         sync: false
-      - key: BRAVE_SEARCH_API_KEY
+      - key: ALLOWED_ORIGINS
         sync: false
+      - key: RATE_LIMIT_PER_MINUTE
+        value: "60"
+      - key: DEFAULT_TOOL_TIMEOUT
+        value: "120.0"
+
+  # ── Grafux-mcp background worker ─────────────────────────────────────────
+  # Handles: health monitoring, E2B sandbox cleanup, Redis event consumers
+  - type: worker
+    name: grafux-mcp-worker
+    runtime: python
+    plan: starter
+    region: oregon
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.worker
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PYTHONPATH
+        value: "/opt/render/project/src"
+      - key: SERVICE_NAME
+        value: grafux-mcp-worker
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: grafux-mcp-db
+          property: connectionString
+      - key: REDIS_URL
+        sync: false
+      - key: INTERNAL_SERVICE_KEY
+        sync: false
+      - key: BACKEND_INTERNAL_URL
+        sync: false
+      - key: E2B_API_KEY
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_BUCKET_NAME
+        value: grafux-user-files
+      - key: S3_SYNC_INTERVAL
+        value: "600"
+      - key: GCP_SERVICE_ACCOUNT_JSON
+        sync: false
+
+databases:
+  - name: grafux-mcp-db
+    databaseName: grafux_mcp
+    plan: starter
+    region: oregon

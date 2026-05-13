@@ -1,106 +1,95 @@
 """
-Brave Web Search MCP Tool
-=========================
-Exposes a `brave_search` tool that performs a live web search via the Brave
-Search API and returns the top results as plain text that can be written to
-an output port.
+tools/brave_search.py — Brave Web Search system tool.
 
-Environment variable required:
-    BRAVE_SEARCH_API_KEY  — Brave Search subscription token.
-                            Get one at https://api.search.brave.com/
-
-Tool input schema:
-    query  (str, required) — the search query
-    count  (int, optional) — number of results to return (default 10, max 20)
-
-Tool output:
-    A string containing numbered result entries (title, description, URL).
+Built-in tool loaded by local_runner.py at startup.
+Uses the @register_tool decorator from the new runtime.
 """
 
-import os
+from __future__ import annotations
+
 import json
-import urllib.request
-import urllib.parse
+import os
 import urllib.error
+import urllib.parse
+import urllib.request
 
 
-TOOL_NAME = "brave_search"
-TOOL_DESCRIPTION = (
-    "Search the web using the Brave Search API. "
-    "Returns the top web results (title, description, URL) for the given query. "
-    "Useful for gathering live, up-to-date information on any topic."
-)
-TOOL_INPUT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "query": {
-            "type": "string",
-            "description": "The search query string.",
+try:
+    from app.core.runtime.local_runner import register_tool
+except ImportError:
+    # Fallback when loaded via importlib at startup before app is on sys.path
+    def register_tool(name, description, input_schema, **_kw):
+        def wrapper(func):
+            return func
+        return wrapper
+
+
+@register_tool(
+    name="brave_search",
+    description=(
+        "Search the web using the Brave Search API. "
+        "Returns the top web results (title, description, URL) for the given query. "
+        "Useful for gathering live, up-to-date information on any topic."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The search query string.",
+            },
+            "count": {
+                "type": "integer",
+                "description": "Number of results to return (1–20, default 10).",
+                "default": 10,
+                "minimum": 1,
+                "maximum": 20,
+            },
         },
-        "count": {
-            "type": "integer",
-            "description": "Number of results to return (1–20, default 10).",
-            "default": 10,
-            "minimum": 1,
-            "maximum": 20,
-        },
+        "required": ["query"],
     },
-    "required": ["query"],
-}
-
-
-def run(arguments: dict) -> str:
-    """Execute the Brave Search and return formatted plain-text results."""
+)
+def brave_search(arguments: dict) -> dict:
     api_key = os.environ.get("BRAVE_SEARCH_API_KEY", "").strip()
     if not api_key:
-        return "Error: BRAVE_SEARCH_API_KEY environment variable is not set."
+        return {"content": [{"type": "text", "text": "Error: BRAVE_SEARCH_API_KEY not set"}]}
 
     query = arguments.get("query", "").strip()
     if not query:
-        return "Error: 'query' argument is required."
+        return {"content": [{"type": "text", "text": "Error: 'query' argument is required"}]}
 
-    count = int(arguments.get("count", 10))
-    count = max(1, min(count, 20))
+    count = max(1, min(int(arguments.get("count", 10)), 20))
 
-    params = urllib.parse.urlencode({
-        "q": query,
-        "count": count,
-        "text_decorations": "false",
-        "search_lang": "en",
-    })
+    params = urllib.parse.urlencode(
+        {"q": query, "count": count, "text_decorations": "false", "search_lang": "en"}
+    )
     url = f"https://api.search.brave.com/res/v1/web/search?{params}"
-
     req = urllib.request.Request(url)
     req.add_header("Accept", "application/json")
     req.add_header("X-Subscription-Token", api_key)
 
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            raw = resp.read().decode("utf-8")
+            data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        return f"Error: Brave Search API returned HTTP {exc.code}: {exc.reason}"
-    except Exception as exc:  # noqa: BLE001
-        return f"Error: {exc}"
-
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return f"Error: Failed to parse Brave Search response: {exc}"
+        return {"content": [{"type": "text", "text": f"HTTP {exc.code}: {exc.reason}"}]}
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": f"Error: {exc}"}]}
 
     results = data.get("web", {}).get("results", [])
     if not results:
-        return "No results found."
+        return {"content": [{"type": "text", "text": "No results found."}]}
 
     lines = []
     for idx, item in enumerate(results, start=1):
         title = item.get("title", "").strip()
-        description = item.get("description", "").strip()
+        desc = item.get("description", "").strip()
         link = item.get("url", "").strip()
         entry = f"[{idx}] {title}"
-        if description:
-            entry += f"\n{description}"
+        if desc:
+            entry += f"\n{desc}"
         if link:
             entry += f"\nSource: {link}"
         lines.append(entry)
 
-    return "\n\n".join(lines)
+    return {"content": [{"type": "text", "text": "\n\n".join(lines)}]}

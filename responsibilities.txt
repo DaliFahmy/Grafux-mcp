@@ -1,0 +1,44 @@
+Grafux-mcp v2.0 — MCP Gateway, Registry, and Distributed Tool Execution Runtime
+
+RESPONSIBILITIES
+════════════════
+
+MCP Infrastructure Layer
+  • MCP server registry (local, remote SSE/HTTP, Composio, E2B, device)
+  • MCP tool registry with per-org and per-project scoping
+  • MCP server lifecycle management (connect / disconnect / health)
+  • MCP capability negotiation and discovery
+  • MCP protocol client (SSE + HTTP transport via MCP SDK)
+
+Tool Execution Runtime
+  • Sync and async tool invocation
+  • Execution routing: local_plugin / remote_mcp / e2b / composio / device
+  • Retry logic (up to 2 retries with exponential backoff)
+  • Timeout handling and cancellation
+  • Invocation persistence in PostgreSQL
+
+Integrations
+  • E2B: sandboxed Python execution with stdout/stderr streaming
+  • Composio: hosted MCP + OAuth flows (credentials delegated to Grafux-backend)
+  • Grafux-devices: device tool routing and OpenClaw command passthrough
+  • Generic remote MCP: any SSE/HTTP MCP server
+
+Communication
+  • Internal REST API for Grafux-orchestrator tool calls
+  • Redis pub/sub for invocation event streaming
+  • WebSocket JSON-RPC gateway (backward-compatible with Qt/WASM client)
+  • SSE streaming endpoints for browser clients
+
+Security
+  • JWT validation delegated to Grafux-backend (never stores auth secrets)
+  • Org-scoped tool isolation via org_id on every DB query
+  • Internal service-key auth for service-to-service calls
+  • Execution audit logging to PostgreSQL
+
+NOT RESPONSIBLE FOR
+═══════════════════
+  • User authentication / registration     → Grafux-backend
+  • Organization / project CRUD            → Grafux-backend
+  • Workflow orchestration / AI graphs     → Grafux-orchestrator
+  • Business logic / marketplace           → Grafux-backend
+  • Device hardware drivers               → Grafux-devices

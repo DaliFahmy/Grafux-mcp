@@ -1,20 +1,31 @@
-FROM python:3.11-slim
+# ── Grafux-mcp root Dockerfile ───────────────────────────────────────────────
+# This is the Render-facing Dockerfile (runtime: docker not used by default,
+# but kept for local docker build). See docker/Dockerfile for multi-stage build.
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Copy requirements and install dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libpq5 libpq-dev curl \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy server files
-COPY mcp_server.py .
+COPY app/ app/
+COPY migrations/ migrations/
 COPY tools/ tools/
+COPY alembic.ini .
 
-# Expose port
-EXPOSE 8000
+RUN mkdir -p data
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
 
-# Run the MCP HTTP server
-CMD ["python", "mcp_server.py", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8002
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8002}/api/v1/health/liveness || exit 1
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002", "--log-level", "info"]
