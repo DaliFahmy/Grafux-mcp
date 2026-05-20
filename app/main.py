@@ -232,6 +232,9 @@ def create_app() -> FastAPI:
             args.pop("project", None)
         category = args.pop("category", None)
         arguments = args.pop("arguments", args)
+        if not category and isinstance(arguments, dict):
+            from app.core.runtime.local_runner import infer_category_from_arguments
+            category = infer_category_from_arguments(arguments)
 
         # #region agent log
         import json as _json, time as _time
@@ -246,14 +249,39 @@ def create_app() -> FastAPI:
         # #endregion
 
         loop = asyncio.get_event_loop()
+
+        def _invoke() -> dict:
+            return call_tool_direct(tool_name, arguments, username, project, category)
+
         try:
             return await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: call_tool_direct(tool_name, arguments, username, project, category),
-                ),
+                loop.run_in_executor(None, _invoke),
                 timeout=120.0,
             )
+        except ValueError as exc:
+            if "Unknown tool" not in str(exc) or not username or not project:
+                raise
+            from app.core.runtime.local_runner import reload_plugins, s3_syncer
+
+            logger.info(
+                "[DEBUG-121084] Unknown tool %s — syncing from Supabase (user=%s project=%s category=%s)",
+                tool_name, username, project, category,
+            )
+            sb_result = await loop.run_in_executor(
+                None,
+                lambda: s3_syncer.sync_tool_from_supabase(
+                    username, project, tool_name, category
+                ),
+            )
+            if sb_result.get("files_synced", 0) == 0 and sb_result.get("tools_loaded", 0) == 0:
+                await loop.run_in_executor(None, reload_plugins)
+            try:
+                return await asyncio.wait_for(
+                    loop.run_in_executor(None, _invoke),
+                    timeout=120.0,
+                )
+            except ValueError:
+                raise exc from None
         except asyncio.TimeoutError:
             # #region agent log
             _err_entry = _json.dumps({"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "main.py:legacy_call_tool", "message": "tool call timed out", "data": {"tool_name": tool_name, "username": username, "project": project}, "hypothesisId": "H-A"})

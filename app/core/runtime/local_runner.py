@@ -33,6 +33,49 @@ except ImportError:
 from app.config import settings
 
 
+def infer_category_from_arguments(arguments: Dict[str, Any]) -> str | None:
+    """Extract tools/{category}/{tool}/ from port paths in the request body."""
+    for val in arguments.values():
+        if not isinstance(val, str):
+            continue
+        norm = val.replace("\\", "/")
+        marker = "/tools/"
+        if marker not in norm:
+            continue
+        rest = norm.split(marker, 1)[1]
+        parts = rest.split("/")
+        if len(parts) >= 2:
+            return parts[0]
+    return None
+
+
+def tool_is_registered(
+    tool_name: str,
+    username: str | None = None,
+    project: str | None = None,
+    category: str | None = None,
+) -> bool:
+    """Return True if tool_name is already in the in-memory TOOLS registry."""
+    if username and project:
+        if category and f"{username}/{project}/{category}/{tool_name}" in TOOLS:
+            return True
+        if f"{username}/{project}/{tool_name}" in TOOLS:
+            return True
+    if tool_name in TOOLS:
+        return True
+    for info in TOOLS.values():
+        if info.get("name") != tool_name:
+            continue
+        if username and project:
+            if info.get("username") == username and info.get("project") == project:
+                if category and info.get("category") != category:
+                    continue
+                return True
+        else:
+            return True
+    return False
+
+
 # ── Project root resolution ───────────────────────────────────────────────────
 
 def _get_data_root() -> Path:
@@ -694,10 +737,42 @@ class _S3Syncer:
         auth_headers = {"Authorization": f"Bearer {service_key}"}
         data_dir = _get_data_root()
 
-        if category:
-            prefix = f"{username}/{project}/tools/{category}/{tool_name}"
-        else:
-            prefix = f"{username}/{project}/tools/{tool_name}"
+        def _prefixes_to_try() -> List[str]:
+            if category:
+                return [f"{username}/{project}/tools/{category}/{tool_name}"]
+            candidates = [
+                f"{username}/{project}/tools/{tool_name}",
+            ]
+            # Discover category folders (e.g. general) when path omits category
+            try:
+                resp = _httpx.post(
+                    f"{supabase_url}/storage/v1/object/list/{bucket}",
+                    headers={**auth_headers, "Content-Type": "application/json"},
+                    json={
+                        "prefix": f"{username}/{project}/tools/",
+                        "limit": 1000,
+                        "offset": 0,
+                    },
+                    timeout=30.0,
+                )
+                if resp.status_code == 200:
+                    for item in resp.json():
+                        cat = item.get("name", "")
+                        if not cat or cat.startswith(".") or item.get("id") is not None:
+                            continue
+                        candidates.append(
+                            f"{username}/{project}/tools/{cat}/{tool_name}"
+                        )
+            except Exception as exc:
+                print(f"[WARN] Supabase category list failed: {exc}", file=sys.stderr)
+            # Deduplicate while preserving order
+            seen: set[str] = set()
+            ordered: List[str] = []
+            for p in candidates:
+                if p not in seen:
+                    seen.add(p)
+                    ordered.append(p)
+            return ordered
 
         def _list_recursive(path_prefix: str) -> List[str]:
             """Return flat list of all file paths under path_prefix in Supabase."""
@@ -725,10 +800,17 @@ class _S3Syncer:
             return all_paths
 
         try:
-            file_paths = _list_recursive(prefix)
+            file_paths: List[str] = []
+            used_prefix = ""
+            for prefix in _prefixes_to_try():
+                found = _list_recursive(prefix)
+                if found:
+                    file_paths = found
+                    used_prefix = prefix
+                    break
 
             # #region agent log
-            _dbg2 = {"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "local_runner.py:sync_tool_from_supabase", "message": "files listed from supabase", "data": {"prefix": prefix, "file_count": len(file_paths), "files": file_paths[:20]}, "hypothesisId": "H-C"}
+            _dbg2 = {"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "local_runner.py:sync_tool_from_supabase", "message": "files listed from supabase", "data": {"prefix": used_prefix, "file_count": len(file_paths), "files": file_paths[:20]}, "hypothesisId": "H-C"}
             print(f"[DEBUG-121084] {_json.dumps(_dbg2)}", file=sys.stderr)
             try:
                 open("debug-121084.log", "a").write(_json.dumps(_dbg2) + "\n")
