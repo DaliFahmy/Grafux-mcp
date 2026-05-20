@@ -213,21 +213,68 @@ def create_app() -> FastAPI:
         return {"tools": list_local_tools()}
 
     @app.post("/api/tools/{tool_name}")
-    async def legacy_call_tool(tool_name: str, body: dict = None):
+    async def legacy_call_tool(
+        tool_name: str,
+        username: str = None,
+        project: str = None,
+        body: dict = None,
+    ):
         from app.core.runtime.local_runner import call_tool_direct
         args = body or {}
-        username = args.pop("username", None)
-        project = args.pop("project", None)
+        # username/project come from query params; also accept from body for backward compat
+        if not username:
+            username = args.pop("username", None)
+        else:
+            args.pop("username", None)
+        if not project:
+            project = args.pop("project", None)
+        else:
+            args.pop("project", None)
         category = args.pop("category", None)
         arguments = args.pop("arguments", args)
+
+        # #region agent log
+        import json as _json, time as _time
+        _log_entry = _json.dumps({"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "main.py:legacy_call_tool", "message": "tool call received", "data": {"tool_name": tool_name, "username": username, "project": project, "category": category, "arguments_keys": list(arguments.keys()) if isinstance(arguments, dict) else str(arguments)}, "hypothesisId": "H-A"})
+        logger.info("[DEBUG-121084] %s", _log_entry)
+        try:
+            _dbg_f = open("debug-121084.log", "a")
+            _dbg_f.write(_log_entry + "\n")
+            _dbg_f.close()
+        except Exception:
+            pass
+        # #endregion
+
         loop = asyncio.get_event_loop()
-        return await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda: call_tool_direct(tool_name, arguments, username, project, category),
-            ),
-            timeout=120.0,
-        )
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: call_tool_direct(tool_name, arguments, username, project, category),
+                ),
+                timeout=120.0,
+            )
+        except asyncio.TimeoutError:
+            # #region agent log
+            _err_entry = _json.dumps({"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "main.py:legacy_call_tool", "message": "tool call timed out", "data": {"tool_name": tool_name, "username": username, "project": project}, "hypothesisId": "H-A"})
+            logger.error("[DEBUG-121084] %s", _err_entry)
+            try:
+                _dbg_f = open("debug-121084.log", "a"); _dbg_f.write(_err_entry + "\n"); _dbg_f.close()
+            except Exception: pass
+            # #endregion
+            return JSONResponse(status_code=504, content={"isError": True, "content": [{"type": "text", "text": f"Tool '{tool_name}' timed out after 120 s"}]})
+        except Exception as exc:
+            # #region agent log
+            _err_entry = _json.dumps({"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "main.py:legacy_call_tool", "message": f"tool call failed: {type(exc).__name__}: {exc}", "data": {"tool_name": tool_name, "username": username, "project": project, "error": str(exc)}, "hypothesisId": "H-A"})
+            logger.error("[DEBUG-121084] %s", _err_entry)
+            try:
+                _dbg_f = open("debug-121084.log", "a"); _dbg_f.write(_err_entry + "\n"); _dbg_f.close()
+            except Exception: pass
+            # #endregion
+            return JSONResponse(
+                status_code=200,
+                content={"isError": True, "content": [{"type": "text", "text": f"Tool error: {exc}"}]},
+            )
 
     @app.post("/reload-tools")
     async def legacy_reload_tools():
