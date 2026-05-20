@@ -50,6 +50,10 @@ services:
         value: "600"
       - key: GCP_SERVICE_ACCOUNT_JSON
         sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
       - key: ALLOWED_ORIGINS
         sync: false
       - key: RATE_LIMIT_PER_MINUTE

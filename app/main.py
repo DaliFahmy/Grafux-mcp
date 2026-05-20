@@ -298,9 +298,28 @@ def create_app() -> FastAPI:
     ):
         from app.core.runtime.local_runner import s3_syncer
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
+
+        # Primary: pull from Supabase (where the Qt client actually uploads files)
+        sb_result = await loop.run_in_executor(
+            None, lambda: s3_syncer.sync_tool_from_supabase(username, project, tool_name, category)
+        )
+
+        # Secondary: also try S3 (for any files that may live there)
+        s3_result = await loop.run_in_executor(
             None, lambda: s3_syncer.sync_tool(username, project, tool_name, category, user_id)
         )
+
+        total_synced = sb_result.get("files_synced", 0) + s3_result.get("files_synced", 0)
+        total_tools  = max(sb_result.get("tools_loaded", 0), s3_result.get("tools_loaded", 0))
+        success      = bool(total_synced) or sb_result.get("success", False) or s3_result.get("success", False)
+
+        return {
+            "success": success,
+            "files_synced": total_synced,
+            "tools_loaded": total_tools,
+            "supabase": sb_result,
+            "s3": s3_result,
+        }
 
     return app
 

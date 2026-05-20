@@ -654,6 +654,123 @@ class _S3Syncer:
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
+    def sync_tool_from_supabase(
+        self,
+        username: str,
+        project: str,
+        tool_name: str,
+        category: str | None = None,
+    ) -> Dict[str, Any]:
+        """Pull tool files from Supabase storage (primary client upload target) and reload plugins.
+
+        Supabase path layout: {username}/{project}/tools/{category}/{tool_name}/...
+        Local layout:         data/{username}/{project}/tools/{category}/{tool_name}/...
+        """
+        import httpx as _httpx
+
+        supabase_url = settings.supabase_url
+        service_key = settings.supabase_service_role_key
+        bucket = settings.supabase_storage_bucket
+
+        # #region agent log
+        import json as _json, time as _time
+        _dbg = {"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "local_runner.py:sync_tool_from_supabase", "message": "starting supabase sync", "data": {"username": username, "project": project, "tool_name": tool_name, "category": category, "has_supabase_url": bool(supabase_url), "has_service_key": bool(service_key)}, "hypothesisId": "H-C"}
+        print(f"[DEBUG-121084] {_json.dumps(_dbg)}", file=sys.stderr)
+        try:
+            open("debug-121084.log", "a").write(_json.dumps(_dbg) + "\n")
+        except Exception:
+            pass
+        # #endregion
+
+        if not supabase_url or not service_key:
+            return {"success": False, "error": "Supabase credentials not configured on MCP server (set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)"}
+
+        auth_headers = {"Authorization": f"Bearer {service_key}"}
+        data_dir = _get_data_root()
+
+        if category:
+            prefix = f"{username}/{project}/tools/{category}/{tool_name}"
+        else:
+            prefix = f"{username}/{project}/tools/{tool_name}"
+
+        def _list_recursive(path_prefix: str) -> List[str]:
+            """Return flat list of all file paths under path_prefix in Supabase."""
+            all_paths: List[str] = []
+            try:
+                resp = _httpx.post(
+                    f"{supabase_url}/storage/v1/object/list/{bucket}",
+                    headers={**auth_headers, "Content-Type": "application/json"},
+                    json={"prefix": path_prefix, "limit": 1000, "offset": 0},
+                    timeout=30.0,
+                )
+                if resp.status_code != 200:
+                    return []
+                for item in resp.json():
+                    name = item.get("name", "")
+                    if not name or name.startswith("."):
+                        continue
+                    child = f"{path_prefix}/{name}"
+                    if item.get("id") is None:
+                        all_paths.extend(_list_recursive(child))
+                    else:
+                        all_paths.append(child)
+            except Exception as exc:
+                print(f"[ERROR] Supabase list failed for {path_prefix}: {exc}", file=sys.stderr)
+            return all_paths
+
+        try:
+            file_paths = _list_recursive(prefix)
+
+            # #region agent log
+            _dbg2 = {"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "local_runner.py:sync_tool_from_supabase", "message": "files listed from supabase", "data": {"prefix": prefix, "file_count": len(file_paths), "files": file_paths[:20]}, "hypothesisId": "H-C"}
+            print(f"[DEBUG-121084] {_json.dumps(_dbg2)}", file=sys.stderr)
+            try:
+                open("debug-121084.log", "a").write(_json.dumps(_dbg2) + "\n")
+            except Exception:
+                pass
+            # #endregion
+
+            files_synced = 0
+            for file_path in file_paths:
+                filename = file_path.rsplit("/", 1)[-1]
+                if not (filename.endswith(".py") or filename.endswith(".txt") or filename.endswith(".json")):
+                    continue
+                try:
+                    dl = _httpx.get(
+                        f"{supabase_url}/storage/v1/object/{bucket}/{file_path}",
+                        headers=auth_headers,
+                        timeout=30.0,
+                    )
+                    if dl.status_code != 200:
+                        print(f"[WARN] Supabase download failed {file_path}: HTTP {dl.status_code}", file=sys.stderr)
+                        continue
+                except Exception as exc:
+                    print(f"[ERROR] Supabase download error {file_path}: {exc}", file=sys.stderr)
+                    continue
+
+                local_path = data_dir / file_path
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                local_path.write_bytes(dl.content)
+                files_synced += 1
+
+            tools_loaded = 0
+            if files_synced > 0:
+                result = reload_plugins()
+                tools_loaded = result.get("tools", 0)
+
+            # #region agent log
+            _dbg3 = {"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "local_runner.py:sync_tool_from_supabase", "message": "supabase sync complete", "data": {"files_synced": files_synced, "tools_loaded": tools_loaded}, "hypothesisId": "H-C"}
+            print(f"[DEBUG-121084] {_json.dumps(_dbg3)}", file=sys.stderr)
+            try:
+                open("debug-121084.log", "a").write(_json.dumps(_dbg3) + "\n")
+            except Exception:
+                pass
+            # #endregion
+
+            return {"success": True, "files_synced": files_synced, "tools_loaded": tools_loaded}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
 
 s3_syncer = _S3Syncer()
 
