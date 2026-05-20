@@ -137,8 +137,14 @@ def _load_directory(
             mod = importlib.util.module_from_spec(spec)
             if username and project and category:
                 def _make_rt(u: str, p: str, c: str):
-                    def _rt(n: str, desc: str, schema: dict):
-                        return register_tool(n, desc, schema, u, p, c)
+                    def _rt(
+                        name: str,
+                        description: str,
+                        input_schema: dict,
+                    ):
+                        return register_tool(
+                            name, description, input_schema, u, p, c
+                        )
                     return _rt
                 mod.register_tool = _make_rt(username, project, category)  # type: ignore[attr-defined]
             else:
