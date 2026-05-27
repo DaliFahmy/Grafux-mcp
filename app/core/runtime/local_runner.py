@@ -49,33 +49,6 @@ def infer_category_from_arguments(arguments: Dict[str, Any]) -> str | None:
     return None
 
 
-def tool_is_registered(
-    tool_name: str,
-    username: str | None = None,
-    project: str | None = None,
-    category: str | None = None,
-) -> bool:
-    """Return True if tool_name is already in the in-memory TOOLS registry."""
-    if username and project:
-        if category and f"{username}/{project}/{category}/{tool_name}" in TOOLS:
-            return True
-        if f"{username}/{project}/{tool_name}" in TOOLS:
-            return True
-    if tool_name in TOOLS:
-        return True
-    for info in TOOLS.values():
-        if info.get("name") != tool_name:
-            continue
-        if username and project:
-            if info.get("username") == username and info.get("project") == project:
-                if category and info.get("category") != category:
-                    continue
-                return True
-        else:
-            return True
-    return False
-
-
 # ── Project root resolution ───────────────────────────────────────────────────
 
 def _get_data_root() -> Path:
@@ -721,16 +694,6 @@ class _S3Syncer:
         service_key = settings.supabase_service_role_key
         bucket = settings.supabase_storage_bucket
 
-        # #region agent log
-        import json as _json, time as _time
-        _dbg = {"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "local_runner.py:sync_tool_from_supabase", "message": "starting supabase sync", "data": {"username": username, "project": project, "tool_name": tool_name, "category": category, "has_supabase_url": bool(supabase_url), "has_service_key": bool(service_key)}, "hypothesisId": "H-C"}
-        print(f"[DEBUG-121084] {_json.dumps(_dbg)}", file=sys.stderr)
-        try:
-            open("debug-121084.log", "a").write(_json.dumps(_dbg) + "\n")
-        except Exception:
-            pass
-        # #endregion
-
         if not supabase_url or not service_key:
             return {"success": False, "error": "Supabase credentials not configured on MCP server (set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)"}
 
@@ -801,22 +764,11 @@ class _S3Syncer:
 
         try:
             file_paths: List[str] = []
-            used_prefix = ""
             for prefix in _prefixes_to_try():
                 found = _list_recursive(prefix)
                 if found:
                     file_paths = found
-                    used_prefix = prefix
                     break
-
-            # #region agent log
-            _dbg2 = {"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "local_runner.py:sync_tool_from_supabase", "message": "files listed from supabase", "data": {"prefix": used_prefix, "file_count": len(file_paths), "files": file_paths[:20]}, "hypothesisId": "H-C"}
-            print(f"[DEBUG-121084] {_json.dumps(_dbg2)}", file=sys.stderr)
-            try:
-                open("debug-121084.log", "a").write(_json.dumps(_dbg2) + "\n")
-            except Exception:
-                pass
-            # #endregion
 
             files_synced = 0
             for file_path in file_paths:
@@ -845,15 +797,6 @@ class _S3Syncer:
             if files_synced > 0:
                 result = reload_plugins()
                 tools_loaded = result.get("tools", 0)
-
-            # #region agent log
-            _dbg3 = {"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "local_runner.py:sync_tool_from_supabase", "message": "supabase sync complete", "data": {"files_synced": files_synced, "tools_loaded": tools_loaded}, "hypothesisId": "H-C"}
-            print(f"[DEBUG-121084] {_json.dumps(_dbg3)}", file=sys.stderr)
-            try:
-                open("debug-121084.log", "a").write(_json.dumps(_dbg3) + "\n")
-            except Exception:
-                pass
-            # #endregion
 
             return {"success": True, "files_synced": files_synced, "tools_loaded": tools_loaded}
         except Exception as exc:

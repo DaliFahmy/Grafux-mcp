@@ -236,18 +236,6 @@ def create_app() -> FastAPI:
             from app.core.runtime.local_runner import infer_category_from_arguments
             category = infer_category_from_arguments(arguments)
 
-        # #region agent log
-        import json as _json, time as _time
-        _log_entry = _json.dumps({"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "main.py:legacy_call_tool", "message": "tool call received", "data": {"tool_name": tool_name, "username": username, "project": project, "category": category, "arguments_keys": list(arguments.keys()) if isinstance(arguments, dict) else str(arguments)}, "hypothesisId": "H-A"})
-        logger.info("[DEBUG-121084] %s", _log_entry)
-        try:
-            _dbg_f = open("debug-121084.log", "a")
-            _dbg_f.write(_log_entry + "\n")
-            _dbg_f.close()
-        except Exception:
-            pass
-        # #endregion
-
         loop = asyncio.get_event_loop()
 
         def _invoke() -> dict:
@@ -264,7 +252,7 @@ def create_app() -> FastAPI:
             from app.core.runtime.local_runner import reload_plugins, s3_syncer
 
             logger.info(
-                "[DEBUG-121084] Unknown tool %s — syncing from Supabase (user=%s project=%s category=%s)",
+                "Unknown tool %s — syncing from Supabase (user=%s project=%s category=%s)",
                 tool_name, username, project, category,
             )
             sb_result = await loop.run_in_executor(
@@ -283,22 +271,10 @@ def create_app() -> FastAPI:
             except ValueError:
                 raise exc from None
         except asyncio.TimeoutError:
-            # #region agent log
-            _err_entry = _json.dumps({"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "main.py:legacy_call_tool", "message": "tool call timed out", "data": {"tool_name": tool_name, "username": username, "project": project}, "hypothesisId": "H-A"})
-            logger.error("[DEBUG-121084] %s", _err_entry)
-            try:
-                _dbg_f = open("debug-121084.log", "a"); _dbg_f.write(_err_entry + "\n"); _dbg_f.close()
-            except Exception: pass
-            # #endregion
+            logger.error("Tool %s timed out (user=%s project=%s)", tool_name, username, project)
             return JSONResponse(status_code=504, content={"isError": True, "content": [{"type": "text", "text": f"Tool '{tool_name}' timed out after 120 s"}]})
         except Exception as exc:
-            # #region agent log
-            _err_entry = _json.dumps({"sessionId": "121084", "timestamp": int(_time.time() * 1000), "location": "main.py:legacy_call_tool", "message": f"tool call failed: {type(exc).__name__}: {exc}", "data": {"tool_name": tool_name, "username": username, "project": project, "error": str(exc)}, "hypothesisId": "H-A"})
-            logger.error("[DEBUG-121084] %s", _err_entry)
-            try:
-                _dbg_f = open("debug-121084.log", "a"); _dbg_f.write(_err_entry + "\n"); _dbg_f.close()
-            except Exception: pass
-            # #endregion
+            logger.error("Tool %s failed: %s", tool_name, exc)
             return JSONResponse(
                 status_code=200,
                 content={"isError": True, "content": [{"type": "text", "text": f"Tool error: {exc}"}]},
