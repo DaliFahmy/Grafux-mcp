@@ -254,11 +254,20 @@ async def _handle_tools_call(params: dict, auth: Any) -> dict:
         }
 
     # Embed output files (v1 compat)
-    output_port_paths = params.get("output_port_paths", [])
-    if output_port_paths and isinstance(result, dict):
-        output_files = _read_output_files(output_port_paths)
-        if output_files:
-            result["output_files"] = output_files
+    if isinstance(result, dict):
+        from app.core.runtime.output_files import infer_output_port_paths, read_output_files
+
+        output_port_paths = params.get("output_port_paths", [])
+        if not output_port_paths:
+            output_port_paths = infer_output_port_paths(arguments)
+        if output_port_paths:
+            output_files = read_output_files(output_port_paths)
+            if not output_files:
+                inferred = infer_output_port_paths(arguments)
+                if inferred:
+                    output_files = read_output_files(inferred)
+            if output_files:
+                result["output_files"] = output_files
 
     return result
 
@@ -353,36 +362,3 @@ async def _handle_sync_tool(params: dict) -> dict:
     )
 
 
-# ── Output file embedding (v1 backward compat) ────────────────────────────────
-
-import base64
-from pathlib import Path
-
-_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
-_PDF_EXTS = {".pdf"}
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-
-
-def _read_output_files(paths: list[str]) -> list[dict]:
-    result: list[dict] = []
-    for rel in paths:
-        local = _PROJECT_ROOT / rel
-        if not local.exists():
-            continue
-        try:
-            text = local.read_text(encoding="utf-8")
-            result.append({"path": rel, "content": text})
-            # Try to attach referenced binary (image/PDF)
-            candidate = local.parent / text.strip()
-            ext = Path(text.strip()).suffix.lower()
-            if (ext in _IMAGE_EXTS or ext in _PDF_EXTS) and candidate.exists():
-                data = candidate.read_bytes()
-                bin_rel = rel.rsplit("/", 1)[0] + "/" + text.strip()
-                result.append({
-                    "path": bin_rel,
-                    "content": base64.b64encode(data).decode("ascii"),
-                    "encoding": "base64",
-                })
-        except Exception:
-            pass
-    return result

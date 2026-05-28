@@ -244,7 +244,7 @@ def create_app() -> FastAPI:
         project: str = None,
     ):
         from app.core.runtime.local_runner import call_tool_direct
-        from app.api.ws.gateway import _read_output_files
+        from app.core.runtime.output_files import infer_output_port_paths, read_output_files
 
         try:
             body = await request.json()
@@ -305,14 +305,23 @@ def create_app() -> FastAPI:
             return call_tool_direct(tool_name, arguments, username, project, category)
 
         def _attach_output_files(result: dict) -> dict:
-            if not isinstance(result, dict) or not output_port_paths:
+            if not isinstance(result, dict):
+                return result
+            paths_to_read = list(output_port_paths)
+            if not paths_to_read and isinstance(arguments, dict):
+                paths_to_read = infer_output_port_paths(arguments)
+            if not paths_to_read:
                 return result
             project_root = Path(__file__).resolve().parents[2]
             path_checks = []
-            for rel in output_port_paths[:8]:
+            for rel in paths_to_read[:8]:
                 local = project_root / rel.replace("\\", "/")
                 path_checks.append({"rel": rel, "exists": local.exists(), "size": local.stat().st_size if local.exists() else 0})
-            output_files = _read_output_files(output_port_paths)
+            output_files = read_output_files(paths_to_read)
+            if not output_files and isinstance(arguments, dict):
+                inferred = infer_output_port_paths(arguments)
+                if inferred and inferred != paths_to_read:
+                    output_files = read_output_files(inferred)
             _agent_debug_log(
                 "main.py:legacy_call_tool:attach_outputs",
                 "output file collection result",
@@ -320,6 +329,7 @@ def create_app() -> FastAPI:
                     "tool_name": tool_name,
                     "path_checks": path_checks,
                     "output_files_count": len(output_files),
+                    "inferred_paths": len(paths_to_read) != len(output_port_paths),
                     "result_has_output_files": "output_files" in result,
                 },
                 "H2",
