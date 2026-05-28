@@ -5,13 +5,16 @@ app/main.py — FastAPI application factory, lifespan, and router registration.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
+import time
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -34,6 +37,27 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+_DEBUG_LOG_PATH = Path(__file__).resolve().parents[2] / "debug-8e0850.log"
+
+
+def _agent_debug_log(location: str, message: str, data: dict, hypothesis_id: str) -> None:
+    # #region agent log
+    try:
+        payload = {
+            "sessionId": "8e0850",
+            "runId": data.pop("runId", "pre-fix"),
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload) + "\n")
+    except Exception:
+        pass
+    # #endregion
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -215,12 +239,51 @@ def create_app() -> FastAPI:
     @app.post("/api/tools/{tool_name}")
     async def legacy_call_tool(
         tool_name: str,
+        request: Request,
         username: str = None,
         project: str = None,
-        body: dict = None,
     ):
         from app.core.runtime.local_runner import call_tool_direct
-        args = body or {}
+        from app.api.ws.gateway import _read_output_files
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+
+        _agent_debug_log(
+            "main.py:legacy_call_tool:entry",
+            "legacy tool call received",
+            {
+                "tool_name": tool_name,
+                "username": username,
+                "project": project,
+                "body_keys": sorted(body.keys()),
+                "body_is_empty": not bool(body),
+            },
+            "H1",
+        )
+
+        output_port_paths = body.pop("__output_port_paths__", None) or body.pop("output_port_paths", None)
+        if isinstance(output_port_paths, list):
+            output_port_paths = [p for p in output_port_paths if isinstance(p, str)]
+        else:
+            output_port_paths = []
+
+        _agent_debug_log(
+            "main.py:legacy_call_tool:output_paths",
+            "parsed output port paths",
+            {
+                "tool_name": tool_name,
+                "output_port_paths_count": len(output_port_paths),
+                "output_port_paths_sample": output_port_paths[:5],
+            },
+            "H1",
+        )
+
+        args = body
         # username/project come from query params; also accept from body for backward compat
         if not username:
             username = args.pop("username", None)
@@ -241,11 +304,36 @@ def create_app() -> FastAPI:
         def _invoke() -> dict:
             return call_tool_direct(tool_name, arguments, username, project, category)
 
+        def _attach_output_files(result: dict) -> dict:
+            if not isinstance(result, dict) or not output_port_paths:
+                return result
+            project_root = Path(__file__).resolve().parents[2]
+            path_checks = []
+            for rel in output_port_paths[:8]:
+                local = project_root / rel.replace("\\", "/")
+                path_checks.append({"rel": rel, "exists": local.exists(), "size": local.stat().st_size if local.exists() else 0})
+            output_files = _read_output_files(output_port_paths)
+            _agent_debug_log(
+                "main.py:legacy_call_tool:attach_outputs",
+                "output file collection result",
+                {
+                    "tool_name": tool_name,
+                    "path_checks": path_checks,
+                    "output_files_count": len(output_files),
+                    "result_has_output_files": "output_files" in result,
+                },
+                "H2",
+            )
+            if output_files:
+                result["output_files"] = output_files
+            return result
+
         try:
-            return await asyncio.wait_for(
+            result = await asyncio.wait_for(
                 loop.run_in_executor(None, _invoke),
                 timeout=120.0,
             )
+            return _attach_output_files(result)
         except ValueError as exc:
             if "Unknown tool" not in str(exc) or not username or not project:
                 raise
@@ -264,10 +352,11 @@ def create_app() -> FastAPI:
             if sb_result.get("files_synced", 0) == 0 and sb_result.get("tools_loaded", 0) == 0:
                 await loop.run_in_executor(None, reload_plugins)
             try:
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     loop.run_in_executor(None, _invoke),
                     timeout=120.0,
                 )
+                return _attach_output_files(result)
             except ValueError:
                 raise exc from None
         except asyncio.TimeoutError:
