@@ -5,13 +5,10 @@ app/main.py — FastAPI application factory, lifespan, and router registration.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import sys
-import time
 from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
-from pathlib import Path
 
 import structlog
 from fastapi import FastAPI, Request
@@ -37,27 +34,6 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-
-_DEBUG_LOG_PATH = Path(__file__).resolve().parents[2] / "debug-8e0850.log"
-
-
-def _agent_debug_log(location: str, message: str, data: dict, hypothesis_id: str) -> None:
-    # #region agent log
-    try:
-        payload = {
-            "sessionId": "8e0850",
-            "runId": data.pop("runId", "pre-fix"),
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload) + "\n")
-    except Exception:
-        pass
-    # #endregion
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -253,35 +229,11 @@ def create_app() -> FastAPI:
         if not isinstance(body, dict):
             body = {}
 
-        _agent_debug_log(
-            "main.py:legacy_call_tool:entry",
-            "legacy tool call received",
-            {
-                "tool_name": tool_name,
-                "username": username,
-                "project": project,
-                "body_keys": sorted(body.keys()),
-                "body_is_empty": not bool(body),
-            },
-            "H1",
-        )
-
         output_port_paths = body.pop("__output_port_paths__", None) or body.pop("output_port_paths", None)
         if isinstance(output_port_paths, list):
             output_port_paths = [p for p in output_port_paths if isinstance(p, str)]
         else:
             output_port_paths = []
-
-        _agent_debug_log(
-            "main.py:legacy_call_tool:output_paths",
-            "parsed output port paths",
-            {
-                "tool_name": tool_name,
-                "output_port_paths_count": len(output_port_paths),
-                "output_port_paths_sample": output_port_paths[:5],
-            },
-            "H1",
-        )
 
         args = body
         # username/project come from query params; also accept from body for backward compat
@@ -312,28 +264,11 @@ def create_app() -> FastAPI:
                 paths_to_read = infer_output_port_paths(arguments)
             if not paths_to_read:
                 return result
-            project_root = Path(__file__).resolve().parents[2]
-            path_checks = []
-            for rel in paths_to_read[:8]:
-                local = project_root / rel.replace("\\", "/")
-                path_checks.append({"rel": rel, "exists": local.exists(), "size": local.stat().st_size if local.exists() else 0})
             output_files = read_output_files(paths_to_read)
             if not output_files and isinstance(arguments, dict):
                 inferred = infer_output_port_paths(arguments)
                 if inferred and inferred != paths_to_read:
                     output_files = read_output_files(inferred)
-            _agent_debug_log(
-                "main.py:legacy_call_tool:attach_outputs",
-                "output file collection result",
-                {
-                    "tool_name": tool_name,
-                    "path_checks": path_checks,
-                    "output_files_count": len(output_files),
-                    "inferred_paths": len(paths_to_read) != len(output_port_paths),
-                    "result_has_output_files": "output_files" in result,
-                },
-                "H2",
-            )
             if output_files:
                 result["output_files"] = output_files
             return result
