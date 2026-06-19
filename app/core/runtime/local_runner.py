@@ -300,7 +300,11 @@ def _load_editable_func(
     })
     func = captured.get("func")
     if not callable(func):
-        raise ValueError("Editable code did not call @register_tool")
+        raise ValueError(
+            "Tool code is not in the required MCP format: it must define a function "
+            "decorated with @register_tool(name=..., description=..., input_schema=...). "
+            "Regenerate the tool to produce a correctly-formatted file."
+        )
     return func
 
 
@@ -374,10 +378,15 @@ def call_tool_direct(
 
     # Fallback: editable-code (live-chat tools without references/*.py)
     if not tool_key:
-        try:
-            fb_func = _load_editable_func({"name": tool_name}, arguments)
-        except Exception:
-            fb_func = None
+        editable_error: str | None = None
+        fb_func = None
+        if _resolve_editable_path(arguments):
+            try:
+                fb_func = _load_editable_func({"name": tool_name}, arguments)
+            except Exception as exc:
+                # Editable code exists but is malformed (e.g. missing @register_tool).
+                # Surface the descriptive reason rather than a misleading "Unknown tool".
+                editable_error = str(exc)
         if fb_func:
             try:
                 result = fb_func(arguments)
@@ -391,6 +400,12 @@ def call_tool_direct(
                     "isError": True,
                     "diagnostics": {"improvements": _suggest_fix(exc)},
                 }
+        if editable_error:
+            return {
+                "content": [{"type": "text", "text": editable_error}],
+                "isError": True,
+                "diagnostics": {"improvements": "Regenerate the tool so its code includes the @register_tool decorator."},
+            }
         raise ValueError(f"Unknown tool: {tool_name}")
 
     # Authorization check

@@ -149,6 +149,35 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # ── CORS-on-500 safety net ────────────────────────────────────────────────
+    # Starlette's CORSMiddleware does NOT add headers to responses produced by an
+    # unhandled exception, so a 500 reaches the browser as an opaque CORS error
+    # ("No 'Access-Control-Allow-Origin' header") that masks the real failure.
+    # Re-apply the CORS header on any unhandled error so the actual cause is visible.
+    def _cors_headers(request: Request) -> dict:
+        origin = request.headers.get("origin")
+        allowed = settings.allowed_origins
+        if origin and ("*" in allowed or origin in allowed):
+            allow_origin = origin
+        elif "*" in allowed:
+            allow_origin = "*"
+        else:
+            allow_origin = allowed[0] if allowed else "*"
+        return {
+            "Access-Control-Allow-Origin": allow_origin,
+            "Access-Control-Allow-Credentials": "false" if "*" in allowed else "true",
+            "Vary": "Origin",
+        }
+
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(request: Request, exc: Exception):
+        logger.error("Unhandled error on %s: %s", request.url.path, exc)
+        return JSONResponse(
+            status_code=500,
+            content={"isError": True, "content": [{"type": "text", "text": f"Server error: {exc}"}]},
+            headers=_cors_headers(request),
+        )
+
     # ── Rate limiting ─────────────────────────────────────────────────────────
     try:
         from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -281,7 +310,13 @@ def create_app() -> FastAPI:
             return _attach_output_files(result)
         except ValueError as exc:
             if "Unknown tool" not in str(exc) or not username or not project:
-                raise
+                # Malformed tool / authorization / namespace error. Return a readable
+                # error (CORS-safe via normal middleware) instead of an opaque 500.
+                logger.error("Tool %s invalid: %s", tool_name, exc)
+                return JSONResponse(
+                    status_code=200,
+                    content={"isError": True, "content": [{"type": "text", "text": f"Tool error: {exc}"}]},
+                )
             from app.core.runtime.local_runner import reload_plugins, s3_syncer
 
             logger.info(
@@ -303,7 +338,12 @@ def create_app() -> FastAPI:
                 )
                 return _attach_output_files(result)
             except ValueError:
-                raise exc from None
+                # Still unknown after a sync attempt — surface a clear error, not a 500.
+                logger.error("Tool %s still unknown after sync (user=%s project=%s)", tool_name, username, project)
+                return JSONResponse(
+                    status_code=200,
+                    content={"isError": True, "content": [{"type": "text", "text": f"Tool error: {exc}"}]},
+                )
         except asyncio.TimeoutError:
             logger.error("Tool %s timed out (user=%s project=%s)", tool_name, username, project)
             return JSONResponse(status_code=504, content={"isError": True, "content": [{"type": "text", "text": f"Tool '{tool_name}' timed out after 120 s"}]})
