@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     orchestrator_internal_url: str = "http://localhost:8001"
     devices_internal_url: str = "http://localhost:8003"
 
+    # ── OpenAI (used by AI-powered generated tools, which read these from env) ──
+    openai_api_key: Optional[str] = None
+    openai_text_model: str = "gpt-4o"
+    openai_image_model: Optional[str] = None
+    openai_video_model: Optional[str] = None
+
     # ── E2B ───────────────────────────────────────────────────────────────────
     e2b_api_key: Optional[str] = None
 
@@ -96,6 +102,22 @@ class Settings(BaseSettings):
                 self.gcp_credentials_file = tmp.name
             except Exception:
                 pass
+
+        # Generated AI tools run in-process via call_tool_direct and read their OpenAI
+        # credentials/model straight from os.environ. Export the configured values under
+        # every name the generated code probes, without clobbering a real env var that is
+        # already set (so the process environment always wins over the .env file).
+        def _export(name: str, value: Optional[str]) -> None:
+            if value and not os.environ.get(name):
+                os.environ[name] = value
+
+        if self.openai_api_key:
+            _export("OPENAI_API_KEY", self.openai_api_key)
+            _export("GARAGE_OPENAI_API_KEY", self.openai_api_key)
+            _export("GRAFUX_GPT_KEY", self.openai_api_key)
+        _export("GARAGE_OPENAI_TEXT_MODEL", self.openai_text_model)
+        _export("GARAGE_OPENAI_IMAGE_MODEL", self.openai_image_model)
+        _export("GARAGE_OPENAI_VIDEO_MODEL", self.openai_video_model)
 
         return self
 
