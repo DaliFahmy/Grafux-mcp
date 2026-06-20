@@ -39,7 +39,7 @@ services:
       - key: OPENAI_API_KEY
         sync: false
       - key: GARAGE_OPENAI_TEXT_MODEL
-        value: gpt-4o
+        sync: false
       - key: E2B_API_KEY
         sync: false
       - key: COMPOSIO_API_KEY

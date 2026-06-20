@@ -39,8 +39,10 @@ class Settings(BaseSettings):
     devices_internal_url: str = "http://localhost:8003"
 
     # ── OpenAI (used by AI-powered generated tools, which read these from env) ──
+    # Model overrides are opt-in: when unset, generated tools keep their own built-in
+    # default model, so we never silently change a model that already works in a deployment.
     openai_api_key: Optional[str] = None
-    openai_text_model: str = "gpt-4o"
+    openai_text_model: Optional[str] = None
     openai_image_model: Optional[str] = None
     openai_video_model: Optional[str] = None
 
