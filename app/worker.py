@@ -16,20 +16,15 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     from app.config import settings
-    from app.cache.redis_client import get_redis_pool
+    from app.cache.redis_client import init_redis
     from app.core.lifecycle.health_monitor import health_monitor
     from app.core.runtime.local_runner import start_plugin_loader, s3_syncer
 
     logging.basicConfig(level=getattr(logging, settings.log_level.upper()), stream=sys.stderr)
     logger.info("Grafux-mcp worker starting...")
 
-    # Verify Redis
-    try:
-        redis = get_redis_pool()
-        await redis.ping()
-        logger.info("Worker Redis connected")
-    except Exception as exc:
-        logger.warning("Worker Redis not available: %s", exc)
+    # Verify Redis (falls back to in-process cache if unreachable)
+    logger.info("Worker Redis %s", await init_redis())
 
     # Load plugins
     start_plugin_loader()

@@ -44,14 +44,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ── Startup ───────────────────────────────────────────────────────────────
 
-    # 1. Verify Redis connectivity
-    from app.cache.redis_client import get_redis_pool
-    try:
-        redis = get_redis_pool()
-        await redis.ping()
-        logger.info("Redis connected: %s", settings.redis_url)
-    except Exception as exc:
-        logger.warning("Redis not available at startup: %s", exc)
+    # 1. Verify Redis connectivity (falls back to in-process cache if unreachable)
+    from app.cache.redis_client import init_redis
+    logger.info("Redis %s", await init_redis())
 
     # 2. Load local tool plugins in background thread
     from app.core.runtime.local_runner import start_plugin_loader
