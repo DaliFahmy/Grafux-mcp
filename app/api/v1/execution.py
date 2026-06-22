@@ -4,8 +4,8 @@ app/api/v1/execution.py — Tool execution endpoints (sync + async + cancel + lo
 
 from __future__ import annotations
 
-import uuid
 import logging
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession

@@ -7,8 +7,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request
@@ -68,14 +68,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     result.get("files_synced", 0),
                     result.get("tools_loaded", 0),
                 )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("S3 sync timed out — continuing with local tools")
         except Exception as exc:
             logger.warning("S3 sync failed: %s", exc)
 
-        # Start periodic S3 sync task
+        # Start periodic S3 sync task (tracked so shutdown can cancel it cleanly)
         if settings.s3_sync_interval > 0:
-            asyncio.create_task(_periodic_s3_sync(), name="periodic-s3-sync")
+            app.state.s3_sync_task = asyncio.create_task(
+                _periodic_s3_sync(), name="periodic-s3-sync"
+            )
 
     # 4. Start health monitor
     from app.core.lifecycle.health_monitor import health_monitor
@@ -91,6 +93,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     from app.core.lifecycle.health_monitor import health_monitor
     await health_monitor.stop()
+
+    # Cancel the periodic S3 sync loop if it is running.
+    sync_task = getattr(app.state, "s3_sync_task", None)
+    if sync_task is not None:
+        sync_task.cancel()
+        try:
+            await sync_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # Drain in-flight async invocations.
+    from app.services.execution_service import execution_service
+    await execution_service.shutdown()
 
     from app.core.lifecycle.server_manager import _active_connections
     for server_id, client in list(_active_connections.items()):
@@ -171,10 +186,11 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception):
-        logger.error("Unhandled error on %s: %s", request.url.path, exc)
+        from app.core.errors import tool_error
+        logger.exception("Unhandled error on %s: %s", request.url.path, exc)
         return JSONResponse(
             status_code=500,
-            content={"isError": True, "content": [{"type": "text", "text": f"Server error: {exc}"}]},
+            content=tool_error(f"Server error: {exc}"),
             headers=_cors_headers(request),
         )
 
@@ -191,10 +207,10 @@ def create_app() -> FastAPI:
         logger.warning("slowapi not installed — rate limiting disabled")
 
     # ── Routers ───────────────────────────────────────────────────────────────
-    from app.api.v1.health import router as health_router
-    from app.api.v1.registry import router as registry_router
     from app.api.v1.discovery import router as discovery_router
     from app.api.v1.execution import router as execution_router
+    from app.api.v1.health import router as health_router
+    from app.api.v1.registry import router as registry_router
     from app.api.v1.sessions import router as sessions_router
     from app.api.v1.streaming import router as streaming_router
     from app.api.ws.gateway import router as ws_router
@@ -240,6 +256,7 @@ app = create_app()
 
 if __name__ == "__main__":
     import argparse
+
     import uvicorn
 
     parser = argparse.ArgumentParser(description="Grafux-mcp Server")

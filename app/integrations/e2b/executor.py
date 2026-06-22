@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
+from app.core.errors import tool_error
 from app.core.streaming.event_bus import event_bus
 
 logger = logging.getLogger(__name__)
+
+_SANDBOX_CREATE_TIMEOUT = 30.0
+_SANDBOX_CLEANUP_TIMEOUT = 10.0
 
 
 class E2BExecutor:
@@ -66,26 +69,33 @@ class E2BExecutor:
         except Exception as exc:
             logger.error("E2B execution failed for invocation %s: %s", invocation_id, exc)
             await event_bus.publish_log(invocation_id, "error", f"Sandbox error: {exc}")
-            return {
-                "content": [{"type": "text", "text": str(exc)}],
-                "isError": True,
-            }
+            return tool_error(str(exc))
         finally:
-            if sandbox and is_new and not persistent_sandbox:
+            # Always tear down an ephemeral sandbox, with a timeout so a hung
+            # close() can't wedge the request and leave the sandbox billing.
+            if sandbox is not None and is_new and not persistent_sandbox:
                 try:
                     from app.integrations.e2b.sandbox import sandbox_manager
-                    await sandbox_manager.destroy_sandbox(sandbox)
-                except Exception:
-                    pass
+                    await asyncio.wait_for(
+                        sandbox_manager.destroy_sandbox(sandbox), timeout=_SANDBOX_CLEANUP_TIMEOUT
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "E2B sandbox cleanup failed for invocation %s: %s", invocation_id, exc
+                    )
 
     async def _create_ephemeral_sandbox(self) -> Any:
         from app.config import settings
+
         try:
             from e2b_code_interpreter import AsyncSandbox
-            return await AsyncSandbox.create(api_key=settings.e2b_api_key)
         except ImportError:
             from e2b import AsyncSandbox
-            return await AsyncSandbox.create(api_key=settings.e2b_api_key)
+
+        # Bound creation so a hung E2B API can't block the invocation indefinitely.
+        return await asyncio.wait_for(
+            AsyncSandbox.create(api_key=settings.e2b_api_key), timeout=_SANDBOX_CREATE_TIMEOUT
+        )
 
     async def _run_in_sandbox(
         self, sandbox: Any, code: str, invocation_id: str

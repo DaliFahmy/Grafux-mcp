@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import traceback
 import warnings
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
+from app.core.errors import tool_error
 from app.core.runtime.diagnostics import suggest_fix
 from app.core.runtime.plugin_loader import (
     TOOLS,
@@ -22,7 +24,7 @@ from app.core.runtime.plugin_loader import (
 )
 
 
-def infer_category_from_arguments(arguments: Dict[str, Any]) -> str | None:
+def infer_category_from_arguments(arguments: dict[str, Any]) -> str | None:
     """Extract tools/{category}/{tool}/ from port paths in the request body."""
     for val in arguments.values():
         if not isinstance(val, str):
@@ -40,7 +42,7 @@ def infer_category_from_arguments(arguments: Dict[str, Any]) -> str | None:
 
 # ── Editable-code helpers (live tool editing in Qt app) ──────────────────────
 
-def _resolve_editable_path(arguments: Dict[str, Any]) -> Optional[Path]:
+def _resolve_editable_path(arguments: dict[str, Any]) -> Path | None:
     raw_path = arguments.get("code") if isinstance(arguments, dict) else None
     if not isinstance(raw_path, str) or not raw_path.strip():
         return None
@@ -55,14 +57,14 @@ def _resolve_editable_path(arguments: Dict[str, Any]) -> Optional[Path]:
 
 
 def _load_editable_func(
-    tool_metadata: Dict[str, Any], arguments: Dict[str, Any]
-) -> Optional[Callable]:
+    tool_metadata: dict[str, Any], arguments: dict[str, Any]
+) -> Callable | None:
     code_path = _resolve_editable_path(arguments)
     if not code_path:
         return None
     source = code_path.read_text(encoding="utf-8")
     compiled = compile(source, str(code_path), "exec")
-    captured: Dict[str, Any] = {}
+    captured: dict[str, Any] = {}
 
     def _capture_rt(name: str, description: str, input_schema: dict):
         def inner(func: Callable) -> Callable:
@@ -92,11 +94,11 @@ def _load_editable_func(
 
 def call_tool_direct(
     tool_name: str,
-    arguments: Dict[str, Any],
+    arguments: dict[str, Any],
     caller_username: str | None = None,
     caller_project: str | None = None,
     caller_category: str | None = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Look up and execute a registered local tool synchronously."""
     if not _plugins_loaded.is_set():
         _plugins_loaded.wait(timeout=120)
@@ -147,18 +149,15 @@ def call_tool_direct(
                     result = {"content": [{"type": "text", "text": str(result)}]}
                 return result
             except Exception as exc:
-                tb = traceback.format_exc()
-                return {
-                    "content": [{"type": "text", "text": tb}],
-                    "isError": True,
-                    "diagnostics": {"improvements": suggest_fix(exc)},
-                }
+                return tool_error(
+                    traceback.format_exc(),
+                    diagnostics={"improvements": suggest_fix(exc)},
+                )
         if editable_error:
-            return {
-                "content": [{"type": "text", "text": editable_error}],
-                "isError": True,
-                "diagnostics": {"improvements": "Regenerate the tool so its code includes the @register_tool decorator."},
-            }
+            return tool_error(
+                editable_error,
+                diagnostics={"improvements": "Regenerate the tool so its code includes the @register_tool decorator."},
+            )
         raise ValueError(f"Unknown tool: {tool_name}")
 
     # Authorization check
@@ -171,7 +170,7 @@ def call_tool_direct(
 
     # Execution
     try:
-        caught_warns: List[str] = []
+        caught_warns: list[str] = []
         with warnings.catch_warnings(record=True) as cw:
             warnings.simplefilter("always")
             editable_func = _load_editable_func(tool_meta, arguments)
@@ -195,21 +194,19 @@ def call_tool_direct(
         if se.text:
             lines += [f"    {se.text.rstrip()}", f"    {pointer}"]
         lines.append(tb)
-        return {
-            "content": [{"type": "text", "text": "\n".join(lines)}],
-            "isError": True,
-            "diagnostics": {"improvements": "Fix syntax error at indicated line."},
-        }
+        return tool_error(
+            "\n".join(lines),
+            diagnostics={"improvements": "Fix syntax error at indicated line."},
+        )
 
     except Exception as exc:
-        return {
-            "content": [{"type": "text", "text": traceback.format_exc()}],
-            "isError": True,
-            "diagnostics": {"improvements": suggest_fix(exc)},
-        }
+        return tool_error(
+            traceback.format_exc(),
+            diagnostics={"improvements": suggest_fix(exc)},
+        )
 
 
-def list_local_tools() -> List[Dict[str, Any]]:
+def list_local_tools() -> list[dict[str, Any]]:
     """Return serializable list of all loaded local tools."""
     _plugins_loaded.wait(timeout=120)
     return [

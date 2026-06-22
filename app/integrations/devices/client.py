@@ -110,7 +110,7 @@ class DevicesClient:
                             "device_event",
                             {"device_id": device_id, **event},
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         continue
                     except Exception as exc:
                         logger.warning("Device event stream error: %s", exc)

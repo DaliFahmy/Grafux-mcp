@@ -9,10 +9,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -58,7 +58,7 @@ class SandboxManager:
         sandbox = await self._create(template=template, timeout=_DEFAULT_SANDBOX_TIMEOUT)
 
         if persistent:
-            expires = datetime.now(timezone.utc) + timedelta(seconds=_DEFAULT_SANDBOX_TIMEOUT)
+            expires = datetime.now(UTC) + timedelta(seconds=_DEFAULT_SANDBOX_TIMEOUT)
             session = SandboxSession(
                 org_id=uuid.UUID(org_id),
                 sandbox_id=sandbox.id,
@@ -112,7 +112,7 @@ class SandboxManager:
             select(SandboxSession).where(
                 SandboxSession.org_id == uuid.UUID(org_id),
                 SandboxSession.status == "active",
-                SandboxSession.expires_at > datetime.now(timezone.utc),
+                SandboxSession.expires_at > datetime.now(UTC),
             ).order_by(SandboxSession.created_at.desc()).limit(1)
         )
         return result.scalar_one_or_none()

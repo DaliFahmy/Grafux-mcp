@@ -5,15 +5,12 @@ app/api/v1/sessions.py — MCP session lifecycle endpoints.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.cache.keys import MCPKeys, TTL_SESSION
-from app.cache.redis_client import cache_delete, cache_set, get_redis
+from app.cache.redis_client import get_redis
 from app.db.database import get_db
-from app.models.session import MCPSession
 from app.schemas.mcp import MCPSessionCreate, MCPSessionResponse
 from app.security.auth import AuthContext, get_auth_context
 from app.services.session_service import session_service

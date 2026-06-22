@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -23,6 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.config import settings
+from app.core.errors import tool_error
+from app.core.exceptions import RemoteCallError
 from app.core.runtime.cancellation import cancellation_registry
 from app.core.runtime.router import execution_router
 from app.core.streaming.event_bus import event_bus
@@ -34,6 +37,20 @@ from app.shared.factories import utcnow
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 2
+
+# Only retry failures that are plausibly transient. Retrying a deterministic
+# error (bad tool, validation, auth, routing) just wastes time and — worse — can
+# run a non-idempotent tool two or three times.
+_TRANSIENT_ERRORS = (TimeoutError, ConnectionError, OSError, RemoteCallError)
+
+
+def _is_transient(exc: BaseException) -> bool:
+    return isinstance(exc, _TRANSIENT_ERRORS)
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Exponential backoff with jitter to avoid a retry thundering herd."""
+    return (2 ** attempt) + random.uniform(0, 0.5)
 
 
 @dataclass(frozen=True)
@@ -57,6 +74,21 @@ class ExecutionService:
     Async path: await invoke_async() — persists invocation and fires off
     a background task; caller polls GET /execute/{id} or streams /ws.
     """
+
+    def __init__(self) -> None:
+        # Gate concurrent tool executions so an overload queues instead of
+        # exhausting DB connections / the thread pool / the event loop. Created
+        # lazily on first use so it binds to the running loop (and so a config
+        # override applied before startup is honoured).
+        self._semaphore: asyncio.Semaphore | None = None
+        # Strong references to in-flight background invocation tasks, so they are
+        # not garbage-collected mid-run and their failures are always observed.
+        self._background_tasks: set[asyncio.Task] = set()
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(settings.max_concurrent_invocations)
+        return self._semaphore
 
     async def invoke(
         self,
@@ -142,9 +174,10 @@ class ExecutionService:
             db=db,
         )
 
-        # Fire and forget — a new DB session is opened inside the task. Routing is
-        # already resolved (plain values), so the task never re-queries for it.
-        asyncio.create_task(
+        # A new DB session is opened inside the task. Routing is already resolved
+        # (plain values), so the task never re-queries for it. The task is tracked
+        # so it is not GC'd mid-run and so its failures are always logged.
+        task = asyncio.create_task(
             self._run_background(
                 invocation_id=invocation.id,
                 arguments=arguments,
@@ -157,7 +190,25 @@ class ExecutionService:
             ),
             name=f"invocation-{invocation.id}",
         )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_background_done)
         return invocation.id
+
+    def _on_background_done(self, task: asyncio.Task) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("Background invocation task %s crashed: %s", task.get_name(), exc, exc_info=exc)
+
+    async def shutdown(self) -> None:
+        """Cancel and drain any in-flight background invocations (lifespan shutdown)."""
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def cancel(self, invocation_id: str) -> bool:
         return cancellation_registry.cancel(invocation_id)
@@ -244,82 +295,79 @@ class ExecutionService:
     ) -> dict[str, Any]:
         invocation_id = str(invocation.id)
 
-        # Mark running
-        await db.execute(
-            update(MCPInvocation)
-            .where(MCPInvocation.id == invocation.id)
-            .values(status=InvocationStatus.RUNNING, started_at=utcnow())
-        )
-        await db.commit()
-        await event_bus.publish_log(invocation_id, "info", f"Starting tool: {invocation.tool_name}")
+        # Gate concurrent executions. Under normal load this acquires immediately;
+        # under overload the invocation waits here (back-pressure) instead of piling
+        # on. The invocation is only marked RUNNING once it actually holds a slot.
+        async with self._get_semaphore():
+            await db.execute(
+                update(MCPInvocation)
+                .where(MCPInvocation.id == invocation.id)
+                .values(status=InvocationStatus.RUNNING, started_at=utcnow())
+            )
+            await db.commit()
+            await event_bus.publish_log(invocation_id, "info", f"Starting tool: {invocation.tool_name}")
 
-        server_type = routing.server_type
-        endpoint_url = routing.endpoint_url
-        server_config = routing.server_config
+            last_error: Exception | None = None
+            for attempt in range(MAX_RETRIES + 1):
+                if cancel_event.is_set():
+                    await self._mark_cancelled(invocation, db)
+                    return tool_error("Invocation cancelled")
 
-        last_error: Exception | None = None
-        for attempt in range(MAX_RETRIES + 1):
-            if cancel_event.is_set():
-                await self._mark_cancelled(invocation, db)
-                return {"content": [{"type": "text", "text": "Invocation cancelled"}], "isError": True}
+                try:
+                    if attempt > 0:
+                        await event_bus.publish_log(
+                            invocation_id, "warn", f"Retry {attempt}/{MAX_RETRIES}"
+                        )
 
-            try:
-                if attempt > 0:
-                    await event_bus.publish_log(
-                        invocation_id, "warn", f"Retry {attempt}/{MAX_RETRIES}"
+                    result = await execution_router.route(
+                        server_type=routing.server_type,
+                        tool_name=invocation.tool_name,
+                        arguments=arguments,
+                        invocation_id=invocation_id,
+                        org_id=str(invocation.org_id),
+                        project_id=str(invocation.project_id) if invocation.project_id else None,
+                        username=username,
+                        project=project,
+                        category=category,
+                        server_config=routing.server_config,
+                        endpoint_url=routing.endpoint_url,
+                        timeout=timeout,
                     )
 
-                result = await execution_router.route(
-                    server_type=server_type,
-                    tool_name=invocation.tool_name,
-                    arguments=arguments,
-                    invocation_id=invocation_id,
-                    org_id=str(invocation.org_id),
-                    project_id=str(invocation.project_id) if invocation.project_id else None,
-                    username=username,
-                    project=project,
-                    category=category,
-                    server_config=server_config,
-                    endpoint_url=endpoint_url,
-                    timeout=timeout,
-                )
+                    await self._mark_done(invocation, result, db)
+                    await event_bus.publish_result(invocation_id, result)
 
-                await self._mark_done(invocation, result, db)
-                await event_bus.publish_result(invocation_id, result)
+                    from app.services.audit_service import audit_service
+                    await audit_service.log(invocation_id, "info", "Tool completed successfully", redis=redis)
 
-                # Audit log
-                from app.services.audit_service import audit_service
-                await audit_service.log(invocation_id, "info", "Tool completed successfully", redis=redis)
+                    return result
 
-                return result
+                except asyncio.CancelledError:
+                    await self._mark_cancelled(invocation, db)
+                    return tool_error("Invocation cancelled")
 
-            except asyncio.TimeoutError:
-                last_error = TimeoutError(f"Tool '{invocation.tool_name}' timed out after {timeout}s")
-                await event_bus.publish_log(invocation_id, "error", str(last_error))
-                if attempt >= MAX_RETRIES:
-                    break
-                await asyncio.sleep(2 ** attempt)
+                except TimeoutError:
+                    last_error = TimeoutError(
+                        f"Tool '{invocation.tool_name}' timed out after {timeout}s"
+                    )
+                    await event_bus.publish_log(invocation_id, "error", str(last_error))
+                    if attempt >= MAX_RETRIES:
+                        break
+                    await asyncio.sleep(_backoff_seconds(attempt))
 
-            except asyncio.CancelledError:
-                await self._mark_cancelled(invocation, db)
-                return {"content": [{"type": "text", "text": "Invocation cancelled"}], "isError": True}
+                except Exception as exc:
+                    last_error = exc
+                    await event_bus.publish_log(invocation_id, "error", str(exc))
+                    # Fail fast on deterministic errors; only retry transient ones.
+                    if attempt >= MAX_RETRIES or not _is_transient(exc):
+                        break
+                    await asyncio.sleep(_backoff_seconds(attempt))
 
-            except Exception as exc:
-                last_error = exc
-                await event_bus.publish_log(invocation_id, "error", str(exc))
-                if attempt >= MAX_RETRIES:
-                    break
-                await asyncio.sleep(2 ** attempt)
-
-        # All retries exhausted
-        error_msg = str(last_error) if last_error else "Unknown error"
-        await self._mark_failed(invocation, error_msg, db)
-        error_result = {
-            "content": [{"type": "text", "text": error_msg}],
-            "isError": True,
-        }
-        await event_bus.publish_error(invocation_id, error_msg)
-        return error_result
+            # All retries exhausted (or a non-transient error broke the loop).
+            error_msg = str(last_error) if last_error else "Unknown error"
+            await self._mark_failed(invocation, error_msg, db)
+            await event_bus.publish_error(invocation_id, error_msg)
+            return tool_error(error_msg)
 
     async def _run_background(
         self,

@@ -4,14 +4,14 @@ app/api/v1/registry.py — MCP server registration and management endpoints.
 
 from __future__ import annotations
 
-import uuid
 import logging
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.cache.redis_client import cache_delete_pattern, get_redis
 from app.cache.keys import MCPKeys
+from app.cache.redis_client import cache_delete_pattern, get_redis
 from app.core.lifecycle.server_manager import server_manager
 from app.core.registry.server_registry import (
     create_server,
@@ -20,10 +20,8 @@ from app.core.registry.server_registry import (
     list_servers,
 )
 from app.db.database import get_db
-from app.models.mcp_server import MCPServer
 from app.schemas.registry import RegisterServerRequest, ServerResponse, UpdateServerRequest
 from app.security.auth import AuthContext, get_auth_context
-from app.security.permissions import assert_server_owned_by_org
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/registry", tags=["registry"])
@@ -138,7 +136,7 @@ async def connect_server(
     try:
         result = await server_manager.connect(server, db, redis)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     # Trigger tool discovery
     from app.services.discovery_service import discovery_service

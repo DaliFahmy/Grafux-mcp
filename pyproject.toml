@@ -1,0 +1,42 @@
+[project]
+name = "grafux-mcp"
+version = "2.0.0"
+description = "MCP Gateway, Registry, and Distributed Tool Execution Runtime"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["migrations"]
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes (unused imports/names), I: import sorting,
+# B: bugbear, UP: pyupgrade, ASYNC: async pitfalls.
+select = ["E", "W", "F", "I", "B", "UP", "ASYNC"]
+ignore = [
+    "E501",      # line length is handled by the formatter, not enforced hard
+    "B008",      # FastAPI uses `Depends(...)` as a default arg by design
+    "ASYNC109",  # `timeout` params are forwarded to asyncio.wait_for/route by design
+    "UP042",     # keep `str, Enum` bases — `StrEnum` changes str()/serialization
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests intentionally import the app for side effects and reach into privates.
+"tests/*" = ["E402", "F401"]
+# The facade re-exports names purely for backward compatibility.
+"app/core/runtime/local_runner.py" = ["F401"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+extend-exclude = "migrations"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+filterwarnings = ["ignore::DeprecationWarning"]

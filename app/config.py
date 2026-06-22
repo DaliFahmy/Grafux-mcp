@@ -7,7 +7,6 @@ from __future__ import annotations
 import os
 import tempfile
 from functools import lru_cache
-from typing import Optional
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -51,30 +50,30 @@ class Settings(BaseSettings):
     # ── OpenAI (used by AI-powered generated tools, which read these from env) ──
     # Model overrides are opt-in: when unset, generated tools keep their own built-in
     # default model, so we never silently change a model that already works in a deployment.
-    openai_api_key: Optional[str] = None
-    openai_text_model: Optional[str] = None
-    openai_image_model: Optional[str] = None
-    openai_video_model: Optional[str] = None
+    openai_api_key: str | None = None
+    openai_text_model: str | None = None
+    openai_image_model: str | None = None
+    openai_video_model: str | None = None
 
     # ── E2B ───────────────────────────────────────────────────────────────────
-    e2b_api_key: Optional[str] = None
+    e2b_api_key: str | None = None
 
     # ── Composio ─────────────────────────────────────────────────────────────
-    composio_api_key: Optional[str] = None
+    composio_api_key: str | None = None
 
     # ── AWS S3 ────────────────────────────────────────────────────────────────
-    aws_access_key_id: Optional[str] = None
-    aws_secret_access_key: Optional[str] = None
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
     s3_bucket_name: str = "grafux-user-files"
     s3_sync_interval: int = 600
 
     # ── Supabase (tool-file sync — primary storage for client uploads) ────────
-    supabase_url: Optional[str] = None
-    supabase_service_role_key: Optional[str] = None
+    supabase_url: str | None = None
+    supabase_service_role_key: str | None = None
     supabase_storage_bucket: str = "grafux-projects"
 
     # ── GCP ───────────────────────────────────────────────────────────────────
-    gcp_service_account_json: Optional[str] = None
+    gcp_service_account_json: str | None = None
 
     # ── CORS ──────────────────────────────────────────────────────────────────
     allowed_origins: list[str] = ["*"]
@@ -91,7 +90,7 @@ class Settings(BaseSettings):
 
     # ── Computed (not from env) ───────────────────────────────────────────────
     is_production: bool = False
-    gcp_credentials_file: Optional[str] = None
+    gcp_credentials_file: str | None = None
 
     @field_validator("allowed_origins", mode="before")
     @classmethod
@@ -101,8 +100,16 @@ class Settings(BaseSettings):
         return v
 
     @model_validator(mode="after")
-    def setup_derived(self) -> "Settings":
+    def setup_derived(self) -> Settings:
         self.is_production = self.environment == "production"
+
+        # Fail fast on insecure production config rather than booting a service
+        # that trusts the shipped default service key. Dev/test are unaffected.
+        if self.is_production and self.internal_service_key == "change_me":
+            raise ValueError(
+                "internal_service_key is still the default 'change_me' in a "
+                "production environment — set INTERNAL_SERVICE_KEY before boot."
+            )
 
         # Write GCP service account JSON to a temp file so ADC picks it up
         if self.gcp_service_account_json and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
@@ -122,7 +129,7 @@ class Settings(BaseSettings):
         # credentials/model straight from os.environ. Export the configured values under
         # every name the generated code probes, without clobbering a real env var that is
         # already set (so the process environment always wins over the .env file).
-        def _export(name: str, value: Optional[str]) -> None:
+        def _export(name: str, value: str | None) -> None:
             if value and not os.environ.get(name):
                 os.environ[name] = value
 

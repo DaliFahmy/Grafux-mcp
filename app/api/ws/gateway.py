@@ -15,19 +15,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import traceback
 from typing import Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from app.core.runtime.local_runner import (
-    TOOLS as LOCAL_TOOLS,
     RESOURCES,
+    _plugins_loaded,
     list_local_tools,
     reload_plugins,
     s3_syncer,
-    start_plugin_loader,
-    _plugins_loaded,
+)
+from app.core.runtime.local_runner import (
+    TOOLS as LOCAL_TOOLS,
 )
 from app.core.streaming.event_bus import event_bus
 from app.core.streaming.stream_manager import stream_manager
@@ -90,7 +90,7 @@ async def websocket_gateway(
         while True:
             try:
                 raw = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Keepalive ping — prevents Render's proxy from closing idle connections
                 await websocket.send_text(_notification("ping"))
                 continue
@@ -120,8 +120,7 @@ async def websocket_gateway(
             except _JsonRpcError as exc:
                 await websocket.send_text(_err(req_id, exc.code, exc.message, exc.data))
             except Exception as exc:
-                logger.error("WS dispatch error method=%s: %s", method, exc)
-                traceback.print_exc()
+                logger.exception("WS dispatch error method=%s: %s", method, exc)
                 await websocket.send_text(_err(req_id, -32603, str(exc)))
 
     except WebSocketDisconnect:
@@ -245,7 +244,7 @@ async def _handle_tools_call(params: dict, auth: Any) -> dict:
             ),
             timeout=120.0,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {
             "content": [{"type": "text", "text": f"Tool '{tool_name}' timed out after 120s"}],
             "isError": True,
@@ -313,8 +312,8 @@ async def _handle_invocation_stream(
 
 
 async def _handle_server_status(params: dict, auth: Any) -> dict:
-    from app.cache.redis_client import get_redis_pool
     from app.cache.keys import MCPKeys
+    from app.cache.redis_client import get_redis_pool
 
     org_id = auth.org_id if auth else "anonymous"
     redis = get_redis_pool()

@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 import logging
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse

@@ -73,7 +73,8 @@ class StreamManager:
         for ws in waiters:
             try:
                 await ws.send_text(payload)
-            except Exception:
+            except Exception as exc:
+                logger.debug("WS send to invocation %s waiter failed: %s", invocation_id, exc)
                 dead.append(ws)
 
         if dead:
@@ -93,7 +94,8 @@ class StreamManager:
         for ws in connections:
             try:
                 await ws.send_text(payload)
-            except Exception:
+            except Exception as exc:
+                logger.debug("WS broadcast to org %s failed: %s", org_id, exc)
                 dead.append(ws)
 
         if dead:

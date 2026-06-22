@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 async def main() -> None:
-    from app.config import settings
     from app.cache.redis_client import init_redis
+    from app.config import settings
     from app.core.lifecycle.health_monitor import health_monitor
-    from app.core.runtime.local_runner import start_plugin_loader, s3_syncer
+    from app.core.runtime.local_runner import s3_syncer, start_plugin_loader
 
     logging.basicConfig(level=getattr(logging, settings.log_level.upper()), stream=sys.stderr)
     logger.info("Grafux-mcp worker starting...")

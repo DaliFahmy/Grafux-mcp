@@ -10,7 +10,7 @@ timestamps are timezone-aware UTC.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def generate_uuid() -> uuid.UUID:
@@ -20,4 +20,4 @@ def generate_uuid() -> uuid.UUID:
 
 def utcnow() -> datetime:
     """Return the current timezone-aware UTC timestamp."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)

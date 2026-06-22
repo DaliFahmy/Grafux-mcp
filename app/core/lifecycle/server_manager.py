@@ -6,16 +6,14 @@ Manages connect/disconnect state transitions and health state in Redis.
 
 from __future__ import annotations
 
-import json
 import logging
-import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.cache.keys import MCPKeys, TTL_HEALTH
+from app.cache.keys import TTL_HEALTH, MCPKeys
 from app.cache.redis_client import cache_set
 from app.core.protocol.mcp_client import MCPClientWrapper
 from app.core.protocol.negotiation import cache_capabilities
@@ -41,7 +39,6 @@ class ServerManager:
         and write health state to Redis.
         """
         server_id = str(server.id)
-        org_id = str(server.org_id)
 
         if server_id in _active_connections:
             return {"status": "already_connected", "server_id": server_id}
@@ -112,7 +109,7 @@ class ServerManager:
         conn = result.scalar_one_or_none()
         if conn:
             conn.status = "disconnected"
-            conn.disconnected_at = datetime.now(timezone.utc)
+            conn.disconnected_at = datetime.now(UTC)
 
         await db.commit()
         await self._write_health(str(server.org_id), server_id, "disconnected", redis=redis)
@@ -132,7 +129,7 @@ class ServerManager:
         redis: Any,
         capabilities: dict,
     ) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         await db.execute(
             update(MCPServer).where(MCPServer.id == server.id).values(status=ServerStatus.ACTIVE)
         )
@@ -166,7 +163,7 @@ class ServerManager:
         payload = {
             "server_id": server_id,
             "status": status,
-            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "checked_at": datetime.now(UTC).isoformat(),
         }
         if error:
             payload["error"] = error

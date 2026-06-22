@@ -5,13 +5,13 @@ app/services/session_service.py — MCP session management.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.cache.keys import MCPKeys, TTL_SESSION
+from app.cache.keys import MCPKeys
 from app.cache.redis_client import cache_delete, cache_set
 from app.models.session import MCPSession
 
@@ -27,7 +27,7 @@ class SessionService:
         db: AsyncSession,
         redis: Any,
     ) -> MCPSession:
-        expires = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+        expires = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
         session = MCPSession(
             org_id=org_id,
             project_id=project_id,

@@ -13,13 +13,12 @@ do not swap them for the pooled async client.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
-import sys
 import threading
-import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 try:
     import boto3 as _boto3  # noqa: F401
@@ -31,12 +30,14 @@ except ImportError:
 from app.config import settings
 from app.core.runtime.plugin_loader import _get_data_root, reload_plugins
 
+logger = logging.getLogger(__name__)
+
 
 class _S3Syncer:
     def __init__(self) -> None:
         self._client: Any = None
-        self._creds: Tuple[str, str] = ("", "")
-        self._uid_cache: Dict[Tuple[str, str], str] = {}
+        self._creds: tuple[str, str] = ("", "")
+        self._uid_cache: dict[tuple[str, str], str] = {}
         self._lock = threading.Lock()
 
     @property
@@ -49,7 +50,8 @@ class _S3Syncer:
         if self._etag_path.exists():
             try:
                 return json.loads(self._etag_path.read_text())
-            except Exception:
+            except Exception as exc:
+                logger.warning("Could not read S3 etag cache: %s", exc)
                 return {}
         return {}
 
@@ -58,8 +60,8 @@ class _S3Syncer:
         try:
             tmp.write_text(json.dumps(cache))
             tmp.replace(self._etag_path)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Could not write S3 etag cache: %s", exc)
 
     def _get_client(self) -> Any:
         if _boto3 is None:
@@ -93,8 +95,8 @@ class _S3Syncer:
                 else:
                     continue
                 break
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("S3 user-id lookup failed for %s: %s", username, exc)
         self._uid_cache[cache_key] = uid
         return uid
 
@@ -103,7 +105,7 @@ class _S3Syncer:
         username: str | None = None,
         project: str | None = None,
         clean_first: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if not S3_AVAILABLE:
             return {"success": False, "error": "boto3 not installed"}
         if not os.environ.get("AWS_ACCESS_KEY_ID"):
@@ -158,7 +160,7 @@ class _S3Syncer:
                         etag_cache[key] = s3_etag
                         files_synced += 1
                     except Exception as exc:
-                        print(f"[ERROR] S3 download failed {key}: {exc}", file=sys.stderr)
+                        logger.error("S3 download failed %s: %s", key, exc)
 
                 # Delete orphans
                 for tp in data_dir.rglob("tools"):
@@ -171,8 +173,8 @@ class _S3Syncer:
                                 if lf_key not in s3_files:
                                     lf.unlink()
                                     files_deleted += 1
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logger.debug("Could not remove orphan file %s: %s", lf, exc)
 
                 self._save_etags(etag_cache)
 
@@ -189,7 +191,7 @@ class _S3Syncer:
                 "tools_loaded": tools_loaded,
             }
         except Exception as exc:
-            traceback.print_exc()
+            logger.exception("S3 sync_all failed: %s", exc)
             return {"success": False, "error": str(exc)}
 
     def sync_tool(
@@ -199,7 +201,7 @@ class _S3Syncer:
         tool_name: str,
         category: str | None = None,
         user_id: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if not S3_AVAILABLE:
             return {"success": False, "error": "boto3 not installed"}
         if not os.environ.get("AWS_ACCESS_KEY_ID"):
@@ -236,7 +238,7 @@ class _S3Syncer:
                             etag_cache[key] = s3_etag
                             files_synced += 1
                         except Exception as exc:
-                            print(f"[ERROR] S3 single-tool download failed {key}: {exc}", file=sys.stderr)
+                            logger.error("S3 single-tool download failed %s: %s", key, exc)
                 self._save_etags(etag_cache)
 
             tools_loaded = 0
@@ -254,7 +256,7 @@ class _S3Syncer:
         project: str,
         tool_name: str,
         category: str | None = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Pull tool files from Supabase storage (primary client upload target) and reload plugins.
 
         Supabase path layout: {username}/{project}/tools/{category}/{tool_name}/...
@@ -272,7 +274,7 @@ class _S3Syncer:
         auth_headers = {"Authorization": f"Bearer {service_key}"}
         data_dir = _get_data_root()
 
-        def _prefixes_to_try() -> List[str]:
+        def _prefixes_to_try() -> list[str]:
             if category:
                 return [f"{username}/{project}/tools/{category}/{tool_name}"]
             candidates = [
@@ -299,19 +301,19 @@ class _S3Syncer:
                             f"{username}/{project}/tools/{cat}/{tool_name}"
                         )
             except Exception as exc:
-                print(f"[WARN] Supabase category list failed: {exc}", file=sys.stderr)
+                logger.warning("Supabase category list failed: %s", exc)
             # Deduplicate while preserving order
             seen: set[str] = set()
-            ordered: List[str] = []
+            ordered: list[str] = []
             for p in candidates:
                 if p not in seen:
                     seen.add(p)
                     ordered.append(p)
             return ordered
 
-        def _list_recursive(path_prefix: str) -> List[str]:
+        def _list_recursive(path_prefix: str) -> list[str]:
             """Return flat list of all file paths under path_prefix in Supabase."""
-            all_paths: List[str] = []
+            all_paths: list[str] = []
             try:
                 resp = _httpx.post(
                     f"{supabase_url}/storage/v1/object/list/{bucket}",
@@ -331,11 +333,11 @@ class _S3Syncer:
                     else:
                         all_paths.append(child)
             except Exception as exc:
-                print(f"[ERROR] Supabase list failed for {path_prefix}: {exc}", file=sys.stderr)
+                logger.error("Supabase list failed for %s: %s", path_prefix, exc)
             return all_paths
 
         try:
-            file_paths: List[str] = []
+            file_paths: list[str] = []
             for prefix in _prefixes_to_try():
                 found = _list_recursive(prefix)
                 if found:
@@ -354,10 +356,10 @@ class _S3Syncer:
                         timeout=30.0,
                     )
                     if dl.status_code != 200:
-                        print(f"[WARN] Supabase download failed {file_path}: HTTP {dl.status_code}", file=sys.stderr)
+                        logger.warning("Supabase download failed %s: HTTP %s", file_path, dl.status_code)
                         continue
                 except Exception as exc:
-                    print(f"[ERROR] Supabase download error {file_path}: {exc}", file=sys.stderr)
+                    logger.error("Supabase download error %s: %s", file_path, exc)
                     continue
 
                 local_path = data_dir / file_path

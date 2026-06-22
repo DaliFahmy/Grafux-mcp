@@ -9,7 +9,7 @@ import logging
 import time
 from typing import Any
 
-from app.cache.keys import MCPKeys, TTL_HEALTH
+from app.cache.keys import TTL_HEALTH
 from app.cache.redis_client import cache_set, get_redis_pool
 
 logger = logging.getLogger(__name__)
@@ -63,7 +63,7 @@ class HealthMonitor:
                 await asyncio.wait_for(client.list_tools(), timeout=10.0)
                 latency_ms = (time.monotonic() - t0) * 1000
                 status = "healthy"
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 latency_ms = 10_000
                 status = "timeout"
                 error = "Health check timed out"

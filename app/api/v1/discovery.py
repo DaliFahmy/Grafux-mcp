@@ -8,15 +8,15 @@ import json
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.cache.keys import MCPKeys, TTL_TOOLS
+from app.cache.keys import TTL_TOOLS, MCPKeys
 from app.cache.redis_client import cache_get, cache_set, get_redis
 from app.core.runtime import local_runner as _lr
 from app.db.database import get_db
-from app.models.mcp_tool import MCPTool, OrgMCPTool
+from app.models.mcp_tool import MCPTool
 from app.schemas.registry import ToolResponse
 from app.security.auth import AuthContext, get_auth_context
 
@@ -106,7 +106,6 @@ async def get_tool(
     )
     tool = result.scalar_one_or_none()
     if not tool:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Tool not found")
     return ToolResponse.model_validate(tool)
 
@@ -126,7 +125,6 @@ async def get_tool_schema(
     )
     row = result.scalar_one_or_none()
     if row is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Tool not found")
     return {"input_schema": row}
 

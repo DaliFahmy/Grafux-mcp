@@ -4,7 +4,6 @@ app/core/protocol/mcp_client.py — MCP SDK client wrapper for remote MCP server
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 

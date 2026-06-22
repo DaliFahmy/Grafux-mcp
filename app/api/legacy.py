@@ -14,6 +14,7 @@ import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from app.core.errors import tool_error
 from app.core.runtime.threadpool import run_in_threadpool
 
 logger = logging.getLogger(__name__)
@@ -111,10 +112,7 @@ async def legacy_call_tool(
             # Malformed tool / authorization / namespace error. Return a readable
             # error (CORS-safe via normal middleware) instead of an opaque 500.
             logger.error("Tool %s invalid: %s", tool_name, exc)
-            return JSONResponse(
-                status_code=200,
-                content={"isError": True, "content": [{"type": "text", "text": f"Tool error: {exc}"}]},
-            )
+            return JSONResponse(status_code=200, content=tool_error(f"Tool error: {exc}"))
         from app.core.runtime.local_runner import reload_plugins, s3_syncer
 
         logger.info(
@@ -132,19 +130,16 @@ async def legacy_call_tool(
         except ValueError:
             # Still unknown after a sync attempt — surface a clear error, not a 500.
             logger.error("Tool %s still unknown after sync (user=%s project=%s)", tool_name, username, project)
-            return JSONResponse(
-                status_code=200,
-                content={"isError": True, "content": [{"type": "text", "text": f"Tool error: {exc}"}]},
-            )
-    except asyncio.TimeoutError:
+            return JSONResponse(status_code=200, content=tool_error(f"Tool error: {exc}"))
+    except TimeoutError:
         logger.error("Tool %s timed out (user=%s project=%s)", tool_name, username, project)
-        return JSONResponse(status_code=504, content={"isError": True, "content": [{"type": "text", "text": f"Tool '{tool_name}' timed out after 120 s"}]})
+        return JSONResponse(
+            status_code=504,
+            content=tool_error(f"Tool '{tool_name}' timed out after 120 s"),
+        )
     except Exception as exc:
         logger.error("Tool %s failed: %s", tool_name, exc)
-        return JSONResponse(
-            status_code=200,
-            content={"isError": True, "content": [{"type": "text", "text": f"Tool error: {exc}"}]},
-        )
+        return JSONResponse(status_code=200, content=tool_error(f"Tool error: {exc}"))
 
 
 @router.post("/reload-tools")

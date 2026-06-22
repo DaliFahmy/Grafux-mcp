@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.lifecycle.server_manager import server_manager
-from app.core.registry.server_registry import create_server, get_server
+from app.core.registry.server_registry import create_server
 from app.models.mcp_server import MCPServer
 
 

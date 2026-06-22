@@ -4,11 +4,10 @@ app/core/protocol/negotiation.py — MCP capability negotiation.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
-from app.cache.keys import MCPKeys, TTL_CAPABILITIES
+from app.cache.keys import TTL_CAPABILITIES, MCPKeys
 from app.cache.redis_client import cache_get, cache_set
 
 logger = logging.getLogger(__name__)

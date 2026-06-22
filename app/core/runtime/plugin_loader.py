@@ -12,12 +12,15 @@ elsewhere (e.g. the WS gateway's ``TOOLS``) stay valid across reloads.
 from __future__ import annotations
 
 import importlib.util
+import logging
 import shutil
 import sys
 import threading
-import traceback
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 # ── Project root resolution ───────────────────────────────────────────────────
@@ -35,10 +38,10 @@ def _get_tools_root() -> Path:
 # ── In-memory registries ──────────────────────────────────────────────────────
 
 _plugins_loaded = threading.Event()
-TOOLS:         Dict[str, Dict[str, Any]] = {}
-RESOURCES:     Dict[str, Dict[str, Any]] = {}
-PROMPTS:       Dict[str, Dict[str, Any]] = {}
-PLUGIN_ERRORS: List[Dict[str, Any]]      = []
+TOOLS:         dict[str, dict[str, Any]] = {}
+RESOURCES:     dict[str, dict[str, Any]] = {}
+PROMPTS:       dict[str, dict[str, Any]] = {}
+PLUGIN_ERRORS: list[dict[str, Any]]      = []
 _reload_lock = threading.Lock()
 
 
@@ -62,7 +65,7 @@ def register_tool(
         else:
             key = name
         if key in TOOLS:
-            print(f"[WARN] Duplicate tool key '{key}' — replacing", file=sys.stderr)
+            logger.warning("Duplicate tool key '%s' — replacing", key)
         TOOLS[key] = {
             "func": func,
             "name": name,
@@ -112,7 +115,7 @@ def _load_directory(
             compile(source, str(py_file), "exec")
         except SyntaxError as se:
             PLUGIN_ERRORS.append({"file": str(py_file), "error": str(se)})
-            print(f"[ERROR] Syntax error in {py_file.name}: {se}", file=sys.stderr)
+            logger.error("Syntax error in %s: %s", py_file.name, se)
             continue
 
         try:
@@ -142,8 +145,7 @@ def _load_directory(
             tools_found += 1
         except Exception as exc:
             PLUGIN_ERRORS.append({"file": str(py_file), "error": str(exc)})
-            print(f"[ERROR] Failed to load {py_file.name}: {exc}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
+            logger.exception("Failed to load %s: %s", py_file.name, exc)
 
     return tools_found
 
@@ -165,7 +167,7 @@ def load_plugins() -> None:
     try:
         user_dirs = [d for d in data_path.iterdir() if d.is_dir() and not d.name.startswith(".")]
     except Exception as exc:
-        print(f"[ERROR] Cannot list data dir: {exc}", file=sys.stderr)
+        logger.error("Cannot list data dir: %s", exc)
         return
 
     for user_dir in user_dirs:
@@ -184,10 +186,10 @@ def load_plugins() -> None:
                             category=category_dir.name,
                         )
 
-    print(f"[INFO] Local plugin loader: {total} tools loaded", file=sys.stderr)
+    logger.info("Local plugin loader: %d tools loaded", total)
 
 
-def reload_plugins() -> Dict[str, Any]:
+def reload_plugins() -> dict[str, Any]:
     """Thread-safe full reload of all tool plugins."""
     with _reload_lock:
         _plugins_loaded.clear()
@@ -234,8 +236,7 @@ def start_plugin_loader() -> None:
         try:
             load_plugins()
         except Exception as exc:
-            print(f"[ERROR] Plugin loader crashed: {exc}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
+            logger.exception("Plugin loader crashed: %s", exc)
         finally:
             _plugins_loaded.set()
 

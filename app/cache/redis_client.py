@@ -16,8 +16,9 @@ import fnmatch
 import json
 import logging
 import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncGenerator
+from typing import Any
 
 import redis.asyncio as aioredis
 from redis.asyncio import Redis
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 _redis_pool: Redis | None = None
-_fallback: "_InMemoryRedis | None" = None
+_fallback: _InMemoryRedis | None = None
 _use_fallback: bool = False
 
 
@@ -64,7 +65,7 @@ class _InMemoryPubSub:
                 data = await self._queue.get()
             else:
                 data = await asyncio.wait_for(self._queue.get(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
         return {"type": "message", "data": data}
 
@@ -189,8 +190,8 @@ async def close_redis_pool() -> None:
     if _redis_pool is not None:
         try:
             await _redis_pool.aclose()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Error closing Redis pool: %s", exc)
         _redis_pool = None
 
 
