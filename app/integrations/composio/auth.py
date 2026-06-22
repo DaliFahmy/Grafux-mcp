@@ -10,9 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import httpx
-
 from app.config import settings
+from app.core.http_client import get_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -32,22 +31,22 @@ async def initiate_oauth(
     if not settings.composio_api_key:
         raise ValueError("COMPOSIO_API_KEY not configured")
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(
-            "https://backend.composio.dev/api/v1/connectedAccounts",
-            headers={
-                "x-api-key": settings.composio_api_key,
-                "Content-Type": "application/json",
-            },
-            json={
-                "appName": provider,
-                "userUuid": f"{org_id}:{user_id}",
-                "redirectUri": redirect_uri,
-                "authMode": "OAUTH2",
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    resp = await get_http_client().post(
+        "https://backend.composio.dev/api/v1/connectedAccounts",
+        headers={
+            "x-api-key": settings.composio_api_key,
+            "Content-Type": "application/json",
+        },
+        json={
+            "appName": provider,
+            "userUuid": f"{org_id}:{user_id}",
+            "redirectUri": redirect_uri,
+            "authMode": "OAUTH2",
+        },
+        timeout=15.0,
+    )
+    resp.raise_for_status()
+    data = resp.json()
 
     return {
         "connection_id": data.get("connectedAccountId"),
@@ -67,17 +66,17 @@ async def notify_backend_of_connection(
     The backend persists the connection metadata in its secret store.
     Grafux-mcp never sees or stores the OAuth tokens.
     """
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            resp = await client.post(
-                f"{settings.backend_internal_url}/internal/mcp/composio/connected",
-                headers={"X-Internal-Service-Key": settings.internal_service_key},
-                json={
-                    "org_id": org_id,
-                    "provider": provider,
-                    "connection_id": connection_id,
-                },
-            )
-            resp.raise_for_status()
-        except Exception as exc:
-            logger.error("Failed to notify backend of Composio connection: %s", exc)
+    try:
+        resp = await get_http_client().post(
+            f"{settings.backend_internal_url}/internal/mcp/composio/connected",
+            headers={"X-Internal-Service-Key": settings.internal_service_key},
+            json={
+                "org_id": org_id,
+                "provider": provider,
+                "connection_id": connection_id,
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        logger.error("Failed to notify backend of Composio connection: %s", exc)

@@ -94,39 +94,37 @@ class MCPClientWrapper:
                 session, transport_ctx = self._session
                 await session.__aexit__(None, None, None)
                 await transport_ctx.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("MCP disconnect cleanup error for %s: %s", self.endpoint_url, exc)
             finally:
                 self._session = None
 
     # ── HTTP fallback (when MCP SDK not available or server uses REST) ────────
 
     async def _http_probe(self) -> dict[str, Any]:
-        import httpx
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                resp = await client.get(f"{self.endpoint_url}/")
-                if resp.status_code < 300:
-                    data = resp.json()
-                    return {"name": data.get("service", "unknown"), "version": "?", "capabilities": {}}
-            except Exception:
-                pass
+        from app.core.http_client import get_http_client
+        try:
+            resp = await get_http_client().get(f"{self.endpoint_url}/", timeout=10.0)
+            if resp.status_code < 300:
+                data = resp.json()
+                return {"name": data.get("service", "unknown"), "version": "?", "capabilities": {}}
+        except Exception as exc:
+            logger.debug("HTTP probe failed for %s: %s", self.endpoint_url, exc)
         return {"name": "unknown", "version": "?", "capabilities": {}}
 
     async def _http_list_tools(self) -> list[dict[str, Any]]:
-        import httpx
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(f"{self.endpoint_url}/api/tools")
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("tools", [])
+        from app.core.http_client import get_http_client
+        resp = await get_http_client().get(f"{self.endpoint_url}/api/tools", timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("tools", [])
 
     async def _http_call_tool(self, name: str, arguments: dict) -> dict[str, Any]:
-        import httpx
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{self.endpoint_url}/api/tools/{name}",
-                json={"arguments": arguments},
-            )
-            resp.raise_for_status()
-            return resp.json()
+        from app.core.http_client import get_http_client
+        resp = await get_http_client().post(
+            f"{self.endpoint_url}/api/tools/{name}",
+            json={"arguments": arguments},
+            timeout=60.0,
+        )
+        resp.raise_for_status()
+        return resp.json()

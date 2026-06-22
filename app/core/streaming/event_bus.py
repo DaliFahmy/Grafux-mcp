@@ -66,29 +66,25 @@ class EventBus:
         redis = get_redis_pool()
         pubsub = redis.pubsub()
 
+        loop = asyncio.get_event_loop()
         try:
             await pubsub.subscribe(channel)
-            deadline = asyncio.get_event_loop().time() + timeout
+            deadline = loop.time() + timeout
 
             while True:
-                remaining = deadline - asyncio.get_event_loop().time()
+                remaining = deadline - loop.time()
                 if remaining <= 0:
                     logger.warning("EventBus subscription timed out for %s", invocation_id)
                     break
 
-                try:
-                    message = await asyncio.wait_for(
-                        pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0),
-                        timeout=min(remaining, 5.0),
-                    )
-                except asyncio.TimeoutError:
-                    continue
-
-                if message is None:
-                    await asyncio.sleep(0.05)
-                    continue
-
-                if message.get("type") != "message":
+                # Block on the socket for the next message (capped so we re-check the
+                # deadline periodically). Returns None on timeout — no busy-wait, no
+                # artificial latency floor.
+                message = await pubsub.get_message(
+                    ignore_subscribe_messages=True,
+                    timeout=min(remaining, 5.0),
+                )
+                if message is None or message.get("type") != "message":
                     continue
 
                 try:
@@ -105,8 +101,8 @@ class EventBus:
             try:
                 await pubsub.unsubscribe(channel)
                 await pubsub.aclose()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("EventBus cleanup error for %s: %s", invocation_id, exc)
 
 
 event_bus = EventBus()

@@ -74,17 +74,17 @@ class ComposioMCPClient:
     # ── REST fallback (Composio native API) ───────────────────────────────────
 
     async def _rest_list_tools(self) -> list[dict[str, Any]]:
-        import httpx
+        from app.core.http_client import get_http_client
         if not self._api_key:
             raise ValueError("Composio API key not configured")
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                "https://backend.composio.dev/api/v2/actions",
-                headers={"x-api-key": self._api_key},
-                params={"limit": 100},
-            )
-            resp.raise_for_status()
-            items = resp.json().get("items", [])
+        resp = await get_http_client().get(
+            "https://backend.composio.dev/api/v2/actions",
+            headers={"x-api-key": self._api_key},
+            params={"limit": 100},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
         return [
             {
                 "name": item.get("name", ""),
@@ -97,17 +97,17 @@ class ComposioMCPClient:
     async def _rest_call_tool(
         self, tool_name: str, arguments: dict[str, Any]
     ) -> dict[str, Any]:
-        import httpx
+        from app.core.http_client import get_http_client
         if not self._api_key:
             raise ValueError("Composio API key not configured")
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"https://backend.composio.dev/api/v2/actions/{tool_name}/execute",
-                headers={"x-api-key": self._api_key, "Content-Type": "application/json"},
-                json={"input": arguments},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        resp = await get_http_client().post(
+            f"https://backend.composio.dev/api/v2/actions/{tool_name}/execute",
+            headers={"x-api-key": self._api_key, "Content-Type": "application/json"},
+            json={"input": arguments},
+            timeout=60.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
         output = data.get("response") or data.get("output") or str(data)
         return {
             "content": [{"type": "text", "text": str(output)}],

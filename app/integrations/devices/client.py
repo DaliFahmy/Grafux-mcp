@@ -12,9 +12,8 @@ import json
 import logging
 from typing import Any
 
-import httpx
-
 from app.config import settings
+from app.core.http_client import get_http_client
 from app.core.streaming.event_bus import event_bus
 
 logger = logging.getLogger(__name__)
@@ -50,12 +49,12 @@ class DevicesClient:
         if invocation_id:
             payload["invocation_id"] = invocation_id
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{self._base_url}/internal/tools/call",
-                headers=self._headers,
-                json=payload,
-            )
+        resp = await get_http_client().post(
+            f"{self._base_url}/internal/tools/call",
+            headers=self._headers,
+            json=payload,
+            timeout=60.0,
+        )
 
         if resp.status_code >= 400:
             error_text = resp.text
@@ -69,17 +68,17 @@ class DevicesClient:
 
     async def list_tools(self) -> list[dict[str, Any]]:
         """List available device tools from Grafux-devices."""
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                resp = await client.get(
-                    f"{self._base_url}/internal/tools",
-                    headers=self._headers,
-                )
-                resp.raise_for_status()
-                return resp.json().get("tools", [])
-            except Exception as exc:
-                logger.warning("Failed to list device tools: %s", exc)
-                return []
+        try:
+            resp = await get_http_client().get(
+                f"{self._base_url}/internal/tools",
+                headers=self._headers,
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            return resp.json().get("tools", [])
+        except Exception as exc:
+            logger.warning("Failed to list device tools: %s", exc)
+            return []
 
     async def stream_device_events(
         self,
@@ -126,11 +125,11 @@ class DevicesClient:
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Send a realtime command to a device (e.g., OpenClaw move)."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{self._base_url}/internal/devices/{device_id}/command",
-                headers=self._headers,
-                json={"command": command, "payload": payload or {}},
-            )
-            resp.raise_for_status()
-            return resp.json()
+        resp = await get_http_client().post(
+            f"{self._base_url}/internal/devices/{device_id}/command",
+            headers=self._headers,
+            json={"command": command, "payload": payload or {}},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        return resp.json()

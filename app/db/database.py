@@ -16,13 +16,21 @@ class Base(DeclarativeBase):
     """Shared declarative base for all ORM models."""
 
 
-engine = create_async_engine(
-    settings.database_url,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
-    echo=not settings.is_production,
-)
+def _engine_kwargs() -> dict:
+    """Engine options. Queue-pool sizing only applies to real server backends;
+    SQLite (used in tests) runs on StaticPool and rejects those kwargs."""
+    kwargs: dict = {"echo": settings.db_echo}
+    if settings.database_url.startswith("sqlite"):
+        return kwargs
+    kwargs.update(
+        pool_pre_ping=True,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
+    return kwargs
+
+
+engine = create_async_engine(settings.database_url, **_engine_kwargs())
 
 AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     engine,

@@ -1,17 +1,43 @@
 """
 app/core/runtime/router.py — Execution router: dispatches tool calls to the
 correct runner based on server type.
+
+Dispatch is table-driven (``server_type → handler``) rather than an if/elif chain,
+and the stateless backend clients (devices, E2B) are constructed once and reused.
+The remote/Composio wrappers are cheap to build because their HTTP now goes through
+the shared pooled client (see ``app/core/http_client.py``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
 
+from app.core.exceptions import RoutingError
 from app.models.mcp_server import ServerType
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _RouteCtx:
+    """Everything a runner might need, shaped once per invocation."""
+
+    tool_name: str
+    arguments: dict[str, Any]
+    invocation_id: str
+    org_id: str
+    project_id: str | None
+    username: str | None
+    project: str | None
+    category: str | None
+    server_config: dict[str, Any]
+    endpoint_url: str | None
+    code: str | None
+    server_type: str
+    timeout: float
 
 
 class ExecutionRouter:
@@ -25,6 +51,20 @@ class ExecutionRouter:
       e2b           → E2BSandboxExecutor
       device        → DevicesClient
     """
+
+    def __init__(self) -> None:
+        # server_type → bound handler. REMOTE_SSE/REMOTE_HTTP share one runner.
+        self._handlers: dict[str, Callable[[_RouteCtx], Awaitable[dict[str, Any]]]] = {
+            ServerType.LOCAL_PLUGIN: self._run_local,
+            ServerType.REMOTE_SSE: self._run_remote,
+            ServerType.REMOTE_HTTP: self._run_remote,
+            ServerType.COMPOSIO: self._run_composio,
+            ServerType.E2B: self._run_e2b,
+            ServerType.DEVICE: self._run_device,
+        }
+        # Stateless clients — built lazily once and reused across invocations.
+        self._devices_client: Any = None
+        self._e2b_executor: Any = None
 
     async def route(
         self,
@@ -45,123 +85,90 @@ class ExecutionRouter:
         code: str | None = None,
         timeout: float = 120.0,
     ) -> dict[str, Any]:
-        if server_type == ServerType.LOCAL_PLUGIN:
-            return await self._run_local(
-                tool_name, arguments, username, project, category, timeout
-            )
+        handler = self._handlers.get(server_type)
+        if handler is None:
+            raise RoutingError(f"Unknown server type: {server_type}")
 
-        if server_type in (ServerType.REMOTE_SSE, ServerType.REMOTE_HTTP):
-            return await self._run_remote(
-                tool_name, arguments, endpoint_url, server_type, timeout
-            )
-
-        if server_type == ServerType.COMPOSIO:
-            return await self._run_composio(
-                tool_name, arguments, server_config or {}, timeout
-            )
-
-        if server_type == ServerType.E2B:
-            return await self._run_e2b(
-                tool_name, arguments, code, org_id, invocation_id, timeout
-            )
-
-        if server_type == ServerType.DEVICE:
-            return await self._run_device(
-                tool_name, arguments, server_config or {}, timeout
-            )
-
-        raise ValueError(f"Unknown server type: {server_type}")
+        ctx = _RouteCtx(
+            tool_name=tool_name,
+            arguments=arguments,
+            invocation_id=invocation_id,
+            org_id=org_id,
+            project_id=project_id,
+            username=username,
+            project=project,
+            category=category,
+            server_config=server_config or {},
+            endpoint_url=endpoint_url,
+            code=code,
+            server_type=server_type,
+            timeout=timeout,
+        )
+        return await handler(ctx)
 
     # ── Runners ───────────────────────────────────────────────────────────────
 
-    async def _run_local(
-        self,
-        tool_name: str,
-        arguments: dict,
-        username: str | None,
-        project: str | None,
-        category: str | None,
-        timeout: float,
-    ) -> dict[str, Any]:
+    async def _run_local(self, ctx: _RouteCtx) -> dict[str, Any]:
         from app.core.runtime.local_runner import call_tool_direct
+        from app.core.runtime.threadpool import run_in_threadpool
 
-        loop = asyncio.get_event_loop()
-        result = await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda: call_tool_direct(tool_name, arguments, username, project, category),
+        return await asyncio.wait_for(
+            run_in_threadpool(
+                call_tool_direct,
+                ctx.tool_name,
+                ctx.arguments,
+                ctx.username,
+                ctx.project,
+                ctx.category,
             ),
-            timeout=timeout,
+            timeout=ctx.timeout,
         )
-        return result
 
-    async def _run_remote(
-        self,
-        tool_name: str,
-        arguments: dict,
-        endpoint_url: str | None,
-        server_type: str,
-        timeout: float,
-    ) -> dict[str, Any]:
+    async def _run_remote(self, ctx: _RouteCtx) -> dict[str, Any]:
         from app.integrations.remote.mcp_client import RemoteMCPClient
 
-        if not endpoint_url:
-            raise ValueError("Remote MCP server requires endpoint_url")
+        if not ctx.endpoint_url:
+            raise RoutingError("Remote MCP server requires endpoint_url")
 
-        transport = "sse" if server_type == ServerType.REMOTE_SSE else "http"
-        client = RemoteMCPClient(endpoint_url=endpoint_url, transport=transport)
+        transport = "sse" if ctx.server_type == ServerType.REMOTE_SSE else "http"
+        client = RemoteMCPClient(endpoint_url=ctx.endpoint_url, transport=transport)
         return await asyncio.wait_for(
-            client.call_tool(tool_name, arguments), timeout=timeout
+            client.call_tool(ctx.tool_name, ctx.arguments), timeout=ctx.timeout
         )
 
-    async def _run_composio(
-        self,
-        tool_name: str,
-        arguments: dict,
-        server_config: dict,
-        timeout: float,
-    ) -> dict[str, Any]:
+    async def _run_composio(self, ctx: _RouteCtx) -> dict[str, Any]:
         from app.integrations.composio.client import ComposioMCPClient
 
-        client = ComposioMCPClient(config=server_config)
+        client = ComposioMCPClient(config=ctx.server_config)
         return await asyncio.wait_for(
-            client.call_tool(tool_name, arguments), timeout=timeout
+            client.call_tool(ctx.tool_name, ctx.arguments), timeout=ctx.timeout
         )
 
-    async def _run_e2b(
-        self,
-        tool_name: str,
-        arguments: dict,
-        code: str | None,
-        org_id: str,
-        invocation_id: str,
-        timeout: float,
-    ) -> dict[str, Any]:
-        from app.integrations.e2b.executor import E2BExecutor
+    async def _run_e2b(self, ctx: _RouteCtx) -> dict[str, Any]:
+        if self._e2b_executor is None:
+            from app.integrations.e2b.executor import E2BExecutor
 
-        executor = E2BExecutor()
+            self._e2b_executor = E2BExecutor()
         return await asyncio.wait_for(
-            executor.execute(
-                code=code or arguments.get("code", ""),
-                arguments=arguments,
-                org_id=org_id,
-                invocation_id=invocation_id,
+            self._e2b_executor.execute(
+                code=ctx.code or ctx.arguments.get("code", ""),
+                arguments=ctx.arguments,
+                org_id=ctx.org_id,
+                invocation_id=ctx.invocation_id,
             ),
-            timeout=timeout,
+            timeout=ctx.timeout,
         )
 
-    async def _run_device(
-        self,
-        tool_name: str,
-        arguments: dict,
-        server_config: dict,
-        timeout: float,
-    ) -> dict[str, Any]:
-        from app.integrations.devices.client import DevicesClient
+    async def _run_device(self, ctx: _RouteCtx) -> dict[str, Any]:
+        if self._devices_client is None:
+            from app.integrations.devices.client import DevicesClient
 
-        client = DevicesClient()
+            self._devices_client = DevicesClient()
         return await asyncio.wait_for(
-            client.call_tool(tool_name, arguments, config=server_config), timeout=timeout
+            self._devices_client.call_tool(
+                ctx.tool_name, ctx.arguments, config=ctx.server_config
+            ),
+            timeout=ctx.timeout,
         )
 
 

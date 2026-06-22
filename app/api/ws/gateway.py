@@ -237,12 +237,11 @@ async def _handle_tools_call(params: dict, auth: Any) -> dict:
         username = auth.user_id
 
     from app.core.runtime.local_runner import call_tool_direct
-    loop = asyncio.get_event_loop()
+    from app.core.runtime.threadpool import run_in_threadpool
     try:
         result = await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda: call_tool_direct(tool_name, arguments, username, project, category),
+            run_in_threadpool(
+                call_tool_direct, tool_name, arguments, username, project, category
             ),
             timeout=120.0,
         )
@@ -273,8 +272,8 @@ async def _handle_tools_call(params: dict, auth: Any) -> dict:
 
 
 async def _handle_reload() -> dict:
-    loop = asyncio.get_event_loop()
-    counts = await loop.run_in_executor(None, reload_plugins)
+    from app.core.runtime.threadpool import run_in_threadpool
+    counts = await run_in_threadpool(reload_plugins)
     return {
         "success": True,
         "tools": counts.get("tools", 0),
@@ -332,14 +331,12 @@ async def _handle_server_status(params: dict, auth: Any) -> dict:
 
 
 async def _handle_sync_all(params: dict) -> dict:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None,
-        lambda: s3_syncer.sync_all(
-            username=params.get("username"),
-            project=params.get("project"),
-            clean_first=params.get("clean_first", False),
-        ),
+    from app.core.runtime.threadpool import run_in_threadpool
+    return await run_in_threadpool(
+        s3_syncer.sync_all,
+        username=params.get("username"),
+        project=params.get("project"),
+        clean_first=params.get("clean_first", False),
     )
 
 
@@ -349,16 +346,14 @@ async def _handle_sync_tool(params: dict) -> dict:
     tool_name = params.get("tool_name")
     if not all([username, project, tool_name]):
         raise _JsonRpcError(-32602, "Missing username, project, or tool_name")
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None,
-        lambda: s3_syncer.sync_tool(
-            username=username,
-            project=project,
-            tool_name=tool_name,
-            category=params.get("category"),
-            user_id=params.get("user_id"),
-        ),
+    from app.core.runtime.threadpool import run_in_threadpool
+    return await run_in_threadpool(
+        s3_syncer.sync_tool,
+        username=username,
+        project=project,
+        tool_name=tool_name,
+        category=params.get("category"),
+        user_id=params.get("user_id"),
     )
 
 

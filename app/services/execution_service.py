@@ -15,25 +15,38 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
-from app.cache.keys import MCPKeys
-from app.cache.redis_client import cache_set
 from app.config import settings
 from app.core.runtime.cancellation import cancellation_registry
 from app.core.runtime.router import execution_router
 from app.core.streaming.event_bus import event_bus
-from app.models.invocation import InvocationStatus, MCPInvocation, ToolExecutionLog
-from app.models.mcp_server import MCPServer, ServerType
+from app.models.invocation import InvocationStatus, MCPInvocation
+from app.models.mcp_server import ServerType
 from app.models.mcp_tool import MCPTool
+from app.shared.factories import utcnow
 
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 2
+
+
+@dataclass(frozen=True)
+class RoutingInfo:
+    """Where and how to run an invocation — resolved once, then threaded through.
+
+    Holds only plain values (no ORM objects), so it is safe to pass into a
+    background task running on a different DB session.
+    """
+
+    server_type: str
+    endpoint_url: str | None = None
+    server_config: dict | None = None
 
 
 class ExecutionService:
@@ -63,6 +76,7 @@ class ExecutionService:
         redis: Any,
     ) -> dict[str, Any]:
         """Execute a tool synchronously and return the result."""
+        routing = await self._resolve_tool_routing(tool_id, db)
         invocation = await self._create_invocation(
             tool_name=tool_name,
             arguments=arguments,
@@ -71,6 +85,7 @@ class ExecutionService:
             user_id=user_id,
             session_id=session_id,
             tool_id=tool_id,
+            server_type=routing.server_type,
             db=db,
         )
         invocation_id = str(invocation.id)
@@ -78,9 +93,10 @@ class ExecutionService:
         cancel_event = cancellation_registry.register(invocation_id)
 
         try:
-            result = await self._run(
+            return await self._run(
                 invocation=invocation,
                 arguments=arguments,
+                routing=routing,
                 username=username,
                 project=project,
                 category=category,
@@ -89,7 +105,6 @@ class ExecutionService:
                 redis=redis,
                 cancel_event=cancel_event,
             )
-            return result
         finally:
             cancellation_registry.unregister(invocation_id)
 
@@ -114,6 +129,7 @@ class ExecutionService:
         Start a tool execution in the background and return the invocation_id.
         The caller can poll GET /execute/{id} or subscribe via WebSocket.
         """
+        routing = await self._resolve_tool_routing(tool_id, db)
         invocation = await self._create_invocation(
             tool_name=tool_name,
             arguments=arguments,
@@ -122,16 +138,17 @@ class ExecutionService:
             user_id=user_id,
             session_id=session_id,
             tool_id=tool_id,
+            server_type=routing.server_type,
             db=db,
         )
 
-        # Fire and forget — a new DB session is opened inside the task
+        # Fire and forget — a new DB session is opened inside the task. Routing is
+        # already resolved (plain values), so the task never re-queries for it.
         asyncio.create_task(
             self._run_background(
                 invocation_id=invocation.id,
-                tool_name=tool_name,
                 arguments=arguments,
-                org_id=org_id,
+                routing=routing,
                 username=username,
                 project=project,
                 category=category,
@@ -158,6 +175,30 @@ class ExecutionService:
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
+    async def _resolve_tool_routing(
+        self, tool_id: uuid.UUID | None, db: AsyncSession
+    ) -> RoutingInfo:
+        """Resolve (server_type, endpoint_url, config) for a tool in a single query.
+
+        Uses a joined eager load so the tool and its server come back together,
+        replacing the previous two-query-twice pattern. Falls back to local-plugin
+        routing when there is no tool_id or the row is missing.
+        """
+        if not tool_id:
+            return RoutingInfo(ServerType.LOCAL_PLUGIN)
+
+        result = await db.execute(
+            select(MCPTool)
+            .options(joinedload(MCPTool.server))
+            .where(MCPTool.id == tool_id)
+        )
+        tool = result.scalar_one_or_none()
+        if tool is None or tool.server is None:
+            return RoutingInfo(ServerType.LOCAL_PLUGIN)
+
+        server = tool.server
+        return RoutingInfo(server.server_type, server.endpoint_url, server.config)
+
     async def _create_invocation(
         self,
         *,
@@ -168,23 +209,9 @@ class ExecutionService:
         user_id: str | None,
         session_id: uuid.UUID | None,
         tool_id: uuid.UUID | None,
+        server_type: str,
         db: AsyncSession,
     ) -> MCPInvocation:
-        # Determine server type from tool_id if provided
-        server_type = "local_plugin"
-        if tool_id:
-            result = await db.execute(
-                select(MCPTool).where(MCPTool.id == tool_id)
-            )
-            tool = result.scalar_one_or_none()
-            if tool:
-                srv_result = await db.execute(
-                    select(MCPServer).where(MCPServer.id == tool.server_id)
-                )
-                srv = srv_result.scalar_one_or_none()
-                if srv:
-                    server_type = srv.server_type
-
         invocation = MCPInvocation(
             org_id=uuid.UUID(org_id),
             project_id=uuid.UUID(project_id) if project_id else None,
@@ -206,6 +233,7 @@ class ExecutionService:
         *,
         invocation: MCPInvocation,
         arguments: dict[str, Any],
+        routing: RoutingInfo,
         username: str | None,
         project: str | None,
         category: str | None,
@@ -220,15 +248,14 @@ class ExecutionService:
         await db.execute(
             update(MCPInvocation)
             .where(MCPInvocation.id == invocation.id)
-            .values(status=InvocationStatus.RUNNING, started_at=datetime.now(timezone.utc))
+            .values(status=InvocationStatus.RUNNING, started_at=utcnow())
         )
         await db.commit()
         await event_bus.publish_log(invocation_id, "info", f"Starting tool: {invocation.tool_name}")
 
-        # Resolve routing information
-        server_type, endpoint_url, server_config = await self._resolve_routing(
-            invocation, db
-        )
+        server_type = routing.server_type
+        endpoint_url = routing.endpoint_url
+        server_config = routing.server_config
 
         last_error: Exception | None = None
         for attempt in range(MAX_RETRIES + 1):
@@ -298,9 +325,8 @@ class ExecutionService:
         self,
         *,
         invocation_id: uuid.UUID,
-        tool_name: str,
         arguments: dict[str, Any],
-        org_id: str,
+        routing: RoutingInfo,
         username: str | None,
         project: str | None,
         category: str | None,
@@ -322,6 +348,7 @@ class ExecutionService:
                 await self._run(
                     invocation=invocation,
                     arguments=arguments,
+                    routing=routing,
                     username=username,
                     project=project,
                     category=category,
@@ -335,29 +362,6 @@ class ExecutionService:
         finally:
             cancellation_registry.unregister(str(invocation_id))
 
-    async def _resolve_routing(
-        self, invocation: MCPInvocation, db: AsyncSession
-    ) -> tuple[str, str | None, dict | None]:
-        """Return (server_type, endpoint_url, server_config) for this invocation."""
-        if not invocation.tool_id:
-            return ServerType.LOCAL_PLUGIN, None, None
-
-        result = await db.execute(
-            select(MCPTool).where(MCPTool.id == invocation.tool_id)
-        )
-        tool = result.scalar_one_or_none()
-        if not tool:
-            return ServerType.LOCAL_PLUGIN, None, None
-
-        srv_result = await db.execute(
-            select(MCPServer).where(MCPServer.id == tool.server_id)
-        )
-        server = srv_result.scalar_one_or_none()
-        if not server:
-            return ServerType.LOCAL_PLUGIN, None, None
-
-        return server.server_type, server.endpoint_url, server.config
-
     async def _mark_done(
         self, invocation: MCPInvocation, result: dict, db: AsyncSession
     ) -> None:
@@ -367,7 +371,7 @@ class ExecutionService:
             .values(
                 status=InvocationStatus.DONE,
                 output=result,
-                completed_at=datetime.now(timezone.utc),
+                completed_at=utcnow(),
             )
         )
         await db.commit()
@@ -381,7 +385,7 @@ class ExecutionService:
             .values(
                 status=InvocationStatus.FAILED,
                 error_message=error,
-                completed_at=datetime.now(timezone.utc),
+                completed_at=utcnow(),
             )
         )
         await db.commit()
@@ -394,7 +398,7 @@ class ExecutionService:
             .where(MCPInvocation.id == invocation.id)
             .values(
                 status=InvocationStatus.CANCELLED,
-                completed_at=datetime.now(timezone.utc),
+                completed_at=utcnow(),
             )
         )
         await db.commit()

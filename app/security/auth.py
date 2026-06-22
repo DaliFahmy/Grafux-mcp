@@ -12,11 +12,11 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import settings
+from app.core.http_client import get_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +64,7 @@ async def _validate_token_with_backend(token: str) -> dict[str, Any]:
         "Authorization": f"Bearer {token}",
         "X-Internal-Service-Key": settings.internal_service_key,
     }
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(url, headers=headers)
+    resp = await get_http_client().get(url, headers=headers, timeout=10.0)
 
     if resp.status_code == 200:
         return resp.json()

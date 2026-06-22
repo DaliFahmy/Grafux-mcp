@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,13 +29,14 @@ async def upsert_tools(
 
     incoming_names = {t["name"] for t in tools}
 
-    # Mark missing tools unavailable
+    # Mark tools that vanished from the server's latest listing as unavailable.
     await db.execute(
-        select(MCPTool)
+        update(MCPTool)
         .where(
             MCPTool.server_id == server_id,
             MCPTool.name.notin_(incoming_names),
         )
+        .values(status=ToolStatus.UNAVAILABLE)
     )
     # Upsert via INSERT ... ON CONFLICT
     stmt = insert(MCPTool).values(

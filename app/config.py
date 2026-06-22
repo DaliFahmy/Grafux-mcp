@@ -28,6 +28,16 @@ class Settings(BaseSettings):
 
     # ── Database ──────────────────────────────────────────────────────────────
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/grafux_mcp"
+    # Pool sized to track max_concurrent_invocations; echo is opt-in (never tied to
+    # environment — leaving it on in dev/staging logs every statement).
+    db_echo: bool = False
+    db_pool_size: int = 20
+    db_max_overflow: int = 20
+
+    # ── Outbound HTTP (pooled client — see app/core/http_client.py) ───────────
+    http_default_timeout: float = 30.0
+    http_max_connections: int = 100
+    http_max_keepalive_connections: int = 20
 
     # ── Redis ─────────────────────────────────────────────────────────────────
     redis_url: str = "redis://localhost:6379/1"
@@ -75,6 +85,9 @@ class Settings(BaseSettings):
     # ── Execution ─────────────────────────────────────────────────────────────
     default_tool_timeout: float = 120.0
     max_concurrent_invocations: int = 100
+    # Bounded pool for blocking I/O (S3/Supabase sync, file reads, in-process tool
+    # calls) so heavy sync work can't exhaust the default unbounded executor.
+    threadpool_max_workers: int = 8
 
     # ── Computed (not from env) ───────────────────────────────────────────────
     is_production: bool = False
