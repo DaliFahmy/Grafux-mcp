@@ -126,15 +126,18 @@ class ExecutionRouter:
         )
 
     async def _run_remote(self, ctx: _RouteCtx) -> dict[str, Any]:
-        from app.integrations.remote.mcp_client import RemoteMCPClient
+        from app.core.protocol.connection_pool import remote_connection_pool
 
         if not ctx.endpoint_url:
             raise RoutingError("Remote MCP server requires endpoint_url")
 
         transport = "sse" if ctx.server_type == ServerType.REMOTE_SSE else "http"
-        client = RemoteMCPClient(endpoint_url=ctx.endpoint_url, transport=transport)
+        # Reuse a pooled, lock-guarded connection instead of building one per call.
         return await asyncio.wait_for(
-            client.call_tool(ctx.tool_name, ctx.arguments), timeout=ctx.timeout
+            remote_connection_pool.call_tool(
+                ctx.endpoint_url, transport, ctx.tool_name, ctx.arguments
+            ),
+            timeout=ctx.timeout,
         )
 
     async def _run_composio(self, ctx: _RouteCtx) -> dict[str, Any]:
@@ -166,9 +169,7 @@ class ExecutionRouter:
 
             self._devices_client = DevicesClient()
         return await asyncio.wait_for(
-            self._devices_client.call_tool(
-                ctx.tool_name, ctx.arguments, config=ctx.server_config
-            ),
+            self._devices_client.call_tool(ctx.tool_name, ctx.arguments, config=ctx.server_config),
             timeout=ctx.timeout,
         )
 

@@ -17,6 +17,7 @@ from typing import Any
 from app.core.errors import tool_error
 from app.core.runtime.diagnostics import suggest_fix
 from app.core.runtime.plugin_loader import (
+    NAME_INDEX,
     TOOLS,
     _plugins_loaded,
     register_prompt,
@@ -41,6 +42,7 @@ def infer_category_from_arguments(arguments: dict[str, Any]) -> str | None:
 
 
 # ── Editable-code helpers (live tool editing in Qt app) ──────────────────────
+
 
 def _resolve_editable_path(arguments: dict[str, Any]) -> Path | None:
     raw_path = arguments.get("code") if isinstance(arguments, dict) else None
@@ -68,18 +70,28 @@ def _load_editable_func(
 
     def _capture_rt(name: str, description: str, input_schema: dict):
         def inner(func: Callable) -> Callable:
-            captured.update({"func": func, "name": name,
-                             "description": description, "inputSchema": input_schema})
+            captured.update(
+                {
+                    "func": func,
+                    "name": name,
+                    "description": description,
+                    "inputSchema": input_schema,
+                }
+            )
             return func
+
         return inner
 
-    exec(compiled, {
-        "__file__": str(code_path),
-        "__name__": f"_editable_{tool_metadata.get('name', 'tool')}",
-        "register_tool": _capture_rt,
-        "register_resource": register_resource,
-        "register_prompt": register_prompt,
-    })
+    exec(
+        compiled,
+        {
+            "__file__": str(code_path),
+            "__name__": f"_editable_{tool_metadata.get('name', 'tool')}",
+            "register_tool": _capture_rt,
+            "register_resource": register_resource,
+            "register_prompt": register_prompt,
+        },
+    )
     func = captured.get("func")
     if not callable(func):
         raise ValueError(
@@ -91,6 +103,7 @@ def _load_editable_func(
 
 
 # ── Tool dispatcher ───────────────────────────────────────────────────────────
+
 
 def call_tool_direct(
     tool_name: str,
@@ -119,17 +132,24 @@ def call_tool_direct(
         if tool_name in TOOLS:
             tool_key, tool_meta = tool_name, TOOLS[tool_name]
         else:
-            for k, info in TOOLS.items():
-                if info.get("name") == tool_name:
-                    if caller_username and caller_project:
-                        if info.get("username") == caller_username and info.get("project") == caller_project:
-                            if caller_category and info.get("category") != caller_category:
-                                continue
-                            tool_key, tool_meta = k, info
-                            break
-                    else:
+            # Resolve by display name via the secondary index (O(1) lookup of the
+            # candidate keys) instead of scanning the whole TOOLS registry.
+            for k in NAME_INDEX.get(tool_name, []):
+                info = TOOLS.get(k)
+                if not info:
+                    continue
+                if caller_username and caller_project:
+                    if (
+                        info.get("username") == caller_username
+                        and info.get("project") == caller_project
+                    ):
+                        if caller_category and info.get("category") != caller_category:
+                            continue
                         tool_key, tool_meta = k, info
                         break
+                else:
+                    tool_key, tool_meta = k, info
+                    break
 
     # Fallback: editable-code (live-chat tools without references/*.py)
     if not tool_key:
@@ -156,7 +176,9 @@ def call_tool_direct(
         if editable_error:
             return tool_error(
                 editable_error,
-                diagnostics={"improvements": "Regenerate the tool so its code includes the @register_tool decorator."},
+                diagnostics={
+                    "improvements": "Regenerate the tool so its code includes the @register_tool decorator."
+                },
             )
         raise ValueError(f"Unknown tool: {tool_name}")
 
@@ -190,7 +212,9 @@ def call_tool_direct(
     except SyntaxError as se:
         tb = traceback.format_exc()
         pointer = " " * max((se.offset or 1) - 1, 0) + "^"
-        lines = [f"{Path(se.filename).name if se.filename else 'code'}:{se.lineno}: SyntaxError: {se.msg}"]
+        lines = [
+            f"{Path(se.filename).name if se.filename else 'code'}:{se.lineno}: SyntaxError: {se.msg}"
+        ]
         if se.text:
             lines += [f"    {se.text.rstrip()}", f"    {pointer}"]
         lines.append(tb)

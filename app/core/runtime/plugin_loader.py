@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 # ── Project root resolution ───────────────────────────────────────────────────
 
+
 def _get_data_root() -> Path:
     """Return the data/ directory at the Grafux-mcp repo root."""
     return Path(__file__).resolve().parents[3] / "data"
@@ -38,14 +39,19 @@ def _get_tools_root() -> Path:
 # ── In-memory registries ──────────────────────────────────────────────────────
 
 _plugins_loaded = threading.Event()
-TOOLS:         dict[str, dict[str, Any]] = {}
-RESOURCES:     dict[str, dict[str, Any]] = {}
-PROMPTS:       dict[str, dict[str, Any]] = {}
-PLUGIN_ERRORS: list[dict[str, Any]]      = []
+TOOLS: dict[str, dict[str, Any]] = {}
+# Secondary index: display name → registry keys, so a display-name lookup is O(1)
+# instead of a full scan of TOOLS (a tool's display name is not unique across
+# username/project/category, hence a list of keys per name).
+NAME_INDEX: dict[str, list[str]] = {}
+RESOURCES: dict[str, dict[str, Any]] = {}
+PROMPTS: dict[str, dict[str, Any]] = {}
+PLUGIN_ERRORS: list[dict[str, Any]] = []
 _reload_lock = threading.Lock()
 
 
 # ── Registration decorators ───────────────────────────────────────────────────
+
 
 def register_tool(
     name: str,
@@ -75,18 +81,27 @@ def register_tool(
             "project": project,
             "category": category,
         }
+        keys = NAME_INDEX.setdefault(name, [])
+        if key not in keys:
+            keys.append(key)
         return func
 
     return wrapper
 
 
 def register_resource(
-    uri: str, name: str, description: str = "",
-    mime_type: str = "text/plain", content: str = "",
+    uri: str,
+    name: str,
+    description: str = "",
+    mime_type: str = "text/plain",
+    content: str = "",
 ) -> None:
     RESOURCES[uri] = {
-        "name": name, "description": description,
-        "mimeType": mime_type, "uri": uri, "content": content,
+        "name": name,
+        "description": description,
+        "mimeType": mime_type,
+        "uri": uri,
+        "content": content,
     }
 
 
@@ -94,10 +109,12 @@ def register_prompt(name: str, description: str, arguments: list | None = None):
     def wrapper(func: Callable) -> Callable:
         PROMPTS[name] = {"func": func, "description": description, "arguments": arguments or []}
         return func
+
     return wrapper
 
 
 # ── Plugin loader ─────────────────────────────────────────────────────────────
+
 
 def _load_directory(
     base: Path,
@@ -126,16 +143,17 @@ def _load_directory(
                 continue
             mod = importlib.util.module_from_spec(spec)
             if username and project and category:
+
                 def _make_rt(u: str, p: str, c: str):
                     def _rt(
                         name: str,
                         description: str,
                         input_schema: dict,
                     ):
-                        return register_tool(
-                            name, description, input_schema, u, p, c
-                        )
+                        return register_tool(name, description, input_schema, u, p, c)
+
                     return _rt
+
                 mod.register_tool = _make_rt(username, project, category)  # type: ignore[attr-defined]
             else:
                 mod.register_tool = register_tool  # type: ignore[attr-defined]
@@ -171,12 +189,18 @@ def load_plugins() -> None:
         return
 
     for user_dir in user_dirs:
-        for project_dir in (d for d in user_dir.iterdir() if d.is_dir() and not d.name.startswith(".")):
+        for project_dir in (
+            d for d in user_dir.iterdir() if d.is_dir() and not d.name.startswith(".")
+        ):
             tools_dir = project_dir / "tools"
             if not tools_dir.exists():
                 continue
-            for category_dir in (d for d in tools_dir.iterdir() if d.is_dir() and not d.name.startswith(".")):
-                for tool_dir in (d for d in category_dir.iterdir() if d.is_dir() and not d.name.startswith(".")):
+            for category_dir in (
+                d for d in tools_dir.iterdir() if d.is_dir() and not d.name.startswith(".")
+            ):
+                for tool_dir in (
+                    d for d in category_dir.iterdir() if d.is_dir() and not d.name.startswith(".")
+                ):
                     refs_dir = tool_dir / "references"
                     if refs_dir.exists():
                         total += _load_directory(
@@ -194,20 +218,42 @@ def reload_plugins() -> dict[str, Any]:
     with _reload_lock:
         _plugins_loaded.clear()
         TOOLS.clear()
+        NAME_INDEX.clear()
         RESOURCES.clear()
         PROMPTS.clear()
         PLUGIN_ERRORS.clear()
 
         # Purge cached tool modules from sys.modules
         _SKIP = (
-            "google.", "vertexai.", "grpc.", "proto.", "boto", "botocore.",
-            "flask.", "werkzeug.", "jinja2.", "requests.", "urllib3.",
-            "pydantic.", "fastapi.", "uvicorn.", "starlette.", "anyio.", "sniffio.",
-            "jwt.", "cryptography.", "stripe.", "httpx.", "httpcore.", "app.",
+            "google.",
+            "vertexai.",
+            "grpc.",
+            "proto.",
+            "boto",
+            "botocore.",
+            "flask.",
+            "werkzeug.",
+            "jinja2.",
+            "requests.",
+            "urllib3.",
+            "pydantic.",
+            "fastapi.",
+            "uvicorn.",
+            "starlette.",
+            "anyio.",
+            "sniffio.",
+            "jwt.",
+            "cryptography.",
+            "stripe.",
+            "httpx.",
+            "httpcore.",
+            "app.",
         )
         to_del = [
-            m for m in sys.modules
-            if "." in m and not m.startswith("_")
+            m
+            for m in sys.modules
+            if "." in m
+            and not m.startswith("_")
             and not any(m.startswith(p) for p in _SKIP)
             and len(m.split(".")) >= 3
         ]
@@ -232,6 +278,7 @@ def reload_plugins() -> dict[str, Any]:
 
 def start_plugin_loader() -> None:
     """Kick off background plugin loading. Called once at app startup."""
+
     def _bg() -> None:
         try:
             load_plugins()

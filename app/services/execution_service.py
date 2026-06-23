@@ -50,7 +50,7 @@ def _is_transient(exc: BaseException) -> bool:
 
 def _backoff_seconds(attempt: int) -> float:
     """Exponential backoff with jitter to avoid a retry thundering herd."""
-    return (2 ** attempt) + random.uniform(0, 0.5)
+    return (2**attempt) + random.uniform(0, 0.5)
 
 
 @dataclass(frozen=True)
@@ -64,6 +64,21 @@ class RoutingInfo:
     server_type: str
     endpoint_url: str | None = None
     server_config: dict | None = None
+
+
+@dataclass(frozen=True)
+class _InvocationRef:
+    """The few invocation fields ``_run`` actually needs, as plain values.
+
+    Carrying these instead of the ORM row lets the background task skip re-SELECTing
+    the invocation it just created (every status write is an ``update()...where(id==)``,
+    so no live ORM object is required). Safe across DB sessions and event loops.
+    """
+
+    id: uuid.UUID
+    tool_name: str
+    org_id: str
+    project_id: str | None = None
 
 
 class ExecutionService:
@@ -121,12 +136,18 @@ class ExecutionService:
             db=db,
         )
         invocation_id = str(invocation.id)
+        ref = _InvocationRef(
+            id=invocation.id,
+            tool_name=tool_name,
+            org_id=org_id,
+            project_id=project_id,
+        )
 
         cancel_event = cancellation_registry.register(invocation_id)
 
         try:
             return await self._run(
-                invocation=invocation,
+                ref=ref,
                 arguments=arguments,
                 routing=routing,
                 username=username,
@@ -174,12 +195,19 @@ class ExecutionService:
             db=db,
         )
 
-        # A new DB session is opened inside the task. Routing is already resolved
-        # (plain values), so the task never re-queries for it. The task is tracked
-        # so it is not GC'd mid-run and so its failures are always logged.
+        # A new DB session is opened inside the task. Routing and the invocation
+        # identity are already resolved to plain values, so the task never re-queries
+        # for either. The task is tracked so it is not GC'd mid-run and so its
+        # failures are always logged.
+        ref = _InvocationRef(
+            id=invocation.id,
+            tool_name=tool_name,
+            org_id=org_id,
+            project_id=project_id,
+        )
         task = asyncio.create_task(
             self._run_background(
-                invocation_id=invocation.id,
+                ref=ref,
                 arguments=arguments,
                 routing=routing,
                 username=username,
@@ -200,7 +228,9 @@ class ExecutionService:
             return
         exc = task.exception()
         if exc is not None:
-            logger.error("Background invocation task %s crashed: %s", task.get_name(), exc, exc_info=exc)
+            logger.error(
+                "Background invocation task %s crashed: %s", task.get_name(), exc, exc_info=exc
+            )
 
     async def shutdown(self) -> None:
         """Cancel and drain any in-flight background invocations (lifespan shutdown)."""
@@ -239,9 +269,7 @@ class ExecutionService:
             return RoutingInfo(ServerType.LOCAL_PLUGIN)
 
         result = await db.execute(
-            select(MCPTool)
-            .options(joinedload(MCPTool.server))
-            .where(MCPTool.id == tool_id)
+            select(MCPTool).options(joinedload(MCPTool.server)).where(MCPTool.id == tool_id)
         )
         tool = result.scalar_one_or_none()
         if tool is None or tool.server is None:
@@ -282,7 +310,7 @@ class ExecutionService:
     async def _run(
         self,
         *,
-        invocation: MCPInvocation,
+        ref: _InvocationRef,
         arguments: dict[str, Any],
         routing: RoutingInfo,
         username: str | None,
@@ -293,7 +321,7 @@ class ExecutionService:
         redis: Any,
         cancel_event: asyncio.Event,
     ) -> dict[str, Any]:
-        invocation_id = str(invocation.id)
+        invocation_id = str(ref.id)
 
         # Gate concurrent executions. Under normal load this acquires immediately;
         # under overload the invocation waits here (back-pressure) instead of piling
@@ -301,16 +329,16 @@ class ExecutionService:
         async with self._get_semaphore():
             await db.execute(
                 update(MCPInvocation)
-                .where(MCPInvocation.id == invocation.id)
+                .where(MCPInvocation.id == ref.id)
                 .values(status=InvocationStatus.RUNNING, started_at=utcnow())
             )
             await db.commit()
-            await event_bus.publish_log(invocation_id, "info", f"Starting tool: {invocation.tool_name}")
+            await event_bus.publish_log(invocation_id, "info", f"Starting tool: {ref.tool_name}")
 
             last_error: Exception | None = None
             for attempt in range(MAX_RETRIES + 1):
                 if cancel_event.is_set():
-                    await self._mark_cancelled(invocation, db)
+                    await self._mark_cancelled(ref, db)
                     return tool_error("Invocation cancelled")
 
                 try:
@@ -321,11 +349,11 @@ class ExecutionService:
 
                     result = await execution_router.route(
                         server_type=routing.server_type,
-                        tool_name=invocation.tool_name,
+                        tool_name=ref.tool_name,
                         arguments=arguments,
                         invocation_id=invocation_id,
-                        org_id=str(invocation.org_id),
-                        project_id=str(invocation.project_id) if invocation.project_id else None,
+                        org_id=ref.org_id,
+                        project_id=ref.project_id,
                         username=username,
                         project=project,
                         category=category,
@@ -334,22 +362,23 @@ class ExecutionService:
                         timeout=timeout,
                     )
 
-                    await self._mark_done(invocation, result, db)
+                    await self._mark_done(ref, result, db)
                     await event_bus.publish_result(invocation_id, result)
 
                     from app.services.audit_service import audit_service
-                    await audit_service.log(invocation_id, "info", "Tool completed successfully", redis=redis)
+
+                    await audit_service.log(
+                        invocation_id, "info", "Tool completed successfully", redis=redis
+                    )
 
                     return result
 
                 except asyncio.CancelledError:
-                    await self._mark_cancelled(invocation, db)
+                    await self._mark_cancelled(ref, db)
                     return tool_error("Invocation cancelled")
 
                 except TimeoutError:
-                    last_error = TimeoutError(
-                        f"Tool '{invocation.tool_name}' timed out after {timeout}s"
-                    )
+                    last_error = TimeoutError(f"Tool '{ref.tool_name}' timed out after {timeout}s")
                     await event_bus.publish_log(invocation_id, "error", str(last_error))
                     if attempt >= MAX_RETRIES:
                         break
@@ -365,14 +394,14 @@ class ExecutionService:
 
             # All retries exhausted (or a non-transient error broke the loop).
             error_msg = str(last_error) if last_error else "Unknown error"
-            await self._mark_failed(invocation, error_msg, db)
+            await self._mark_failed(ref, error_msg, db)
             await event_bus.publish_error(invocation_id, error_msg)
             return tool_error(error_msg)
 
     async def _run_background(
         self,
         *,
-        invocation_id: uuid.UUID,
+        ref: _InvocationRef,
         arguments: dict[str, Any],
         routing: RoutingInfo,
         username: str | None,
@@ -381,20 +410,19 @@ class ExecutionService:
         timeout: float,
         redis: Any,
     ) -> None:
-        """Background task wrapper — opens its own DB session."""
+        """Background task wrapper — opens its own DB session.
+
+        The invocation was just created and committed by ``invoke_async``; its needed
+        fields are carried in ``ref``, so there is no re-SELECT here. Status writes are
+        ``update()...where(id==)`` and simply affect zero rows if the row is gone.
+        """
         from app.db.database import AsyncSessionLocal
 
-        cancel_event = cancellation_registry.register(str(invocation_id))
+        cancel_event = cancellation_registry.register(str(ref.id))
         try:
             async with AsyncSessionLocal() as db:
-                result = await db.execute(
-                    select(MCPInvocation).where(MCPInvocation.id == invocation_id)
-                )
-                invocation = result.scalar_one_or_none()
-                if not invocation:
-                    return
                 await self._run(
-                    invocation=invocation,
+                    ref=ref,
                     arguments=arguments,
                     routing=routing,
                     username=username,
@@ -406,16 +434,14 @@ class ExecutionService:
                     cancel_event=cancel_event,
                 )
         except Exception as exc:
-            logger.error("Background invocation %s failed: %s", invocation_id, exc)
+            logger.error("Background invocation %s failed: %s", ref.id, exc)
         finally:
-            cancellation_registry.unregister(str(invocation_id))
+            cancellation_registry.unregister(str(ref.id))
 
-    async def _mark_done(
-        self, invocation: MCPInvocation, result: dict, db: AsyncSession
-    ) -> None:
+    async def _mark_done(self, ref: _InvocationRef, result: dict, db: AsyncSession) -> None:
         await db.execute(
             update(MCPInvocation)
-            .where(MCPInvocation.id == invocation.id)
+            .where(MCPInvocation.id == ref.id)
             .values(
                 status=InvocationStatus.DONE,
                 output=result,
@@ -424,12 +450,10 @@ class ExecutionService:
         )
         await db.commit()
 
-    async def _mark_failed(
-        self, invocation: MCPInvocation, error: str, db: AsyncSession
-    ) -> None:
+    async def _mark_failed(self, ref: _InvocationRef, error: str, db: AsyncSession) -> None:
         await db.execute(
             update(MCPInvocation)
-            .where(MCPInvocation.id == invocation.id)
+            .where(MCPInvocation.id == ref.id)
             .values(
                 status=InvocationStatus.FAILED,
                 error_message=error,
@@ -438,12 +462,10 @@ class ExecutionService:
         )
         await db.commit()
 
-    async def _mark_cancelled(
-        self, invocation: MCPInvocation, db: AsyncSession
-    ) -> None:
+    async def _mark_cancelled(self, ref: _InvocationRef, db: AsyncSession) -> None:
         await db.execute(
             update(MCPInvocation)
-            .where(MCPInvocation.id == invocation.id)
+            .where(MCPInvocation.id == ref.id)
             .values(
                 status=InvocationStatus.CANCELLED,
                 completed_at=utcnow(),

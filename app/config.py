@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     http_max_connections: int = 100
     http_max_keepalive_connections: int = 20
 
+    # ── Remote MCP connection pool (see app/core/protocol/connection_pool.py) ──
+    # Live MCP-SDK sessions are reused per endpoint instead of being rebuilt on
+    # every invocation. Idle sessions are closed after remote_pool_idle_seconds;
+    # the pool holds at most remote_pool_max_size distinct endpoints.
+    remote_pool_max_size: int = 50
+    remote_pool_idle_seconds: float = 300.0
+
+    # ── Remote MCP HTTP fallback (used when the mcp SDK isn't installed) ───────
+    remote_probe_timeout: float = 10.0
+    remote_call_timeout: float = 60.0
+
     # ── Redis ─────────────────────────────────────────────────────────────────
     redis_url: str = "redis://localhost:6379/1"
 

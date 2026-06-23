@@ -23,7 +23,9 @@ structlog.configure(
     processors=[
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
-        structlog.dev.ConsoleRenderer() if not settings.is_production else structlog.processors.JSONRenderer(),
+        structlog.dev.ConsoleRenderer()
+        if not settings.is_production
+        else structlog.processors.JSONRenderer(),
     ],
     wrapper_class=structlog.stdlib.BoundLogger,
     logger_factory=structlog.stdlib.LoggerFactory(),
@@ -38,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Grafux-mcp starting (env=%s)", settings.environment)
@@ -46,10 +49,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # 1. Verify Redis connectivity (falls back to in-process cache if unreachable)
     from app.cache.redis_client import init_redis
+
     logger.info("Redis %s", await init_redis())
 
     # 2. Load local tool plugins in background thread
     from app.core.runtime.local_runner import start_plugin_loader
+
     start_plugin_loader()
 
     # 3. Sync tools from S3 (if configured)
@@ -57,6 +62,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Starting S3 tool sync...")
         from app.core.runtime.local_runner import s3_syncer
         from app.core.runtime.threadpool import run_in_threadpool
+
         try:
             result = await asyncio.wait_for(
                 run_in_threadpool(s3_syncer.sync_all),
@@ -81,6 +87,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # 4. Start health monitor
     from app.core.lifecycle.health_monitor import health_monitor
+
     health_monitor.start()
 
     logger.info("Grafux-mcp startup complete")
@@ -92,6 +99,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Grafux-mcp shutting down...")
 
     from app.core.lifecycle.health_monitor import health_monitor
+
     await health_monitor.stop()
 
     # Cancel the periodic S3 sync loop if it is running.
@@ -105,22 +113,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Drain in-flight async invocations.
     from app.services.execution_service import execution_service
+
     await execution_service.shutdown()
 
     from app.core.lifecycle.server_manager import _active_connections
+
     for server_id, client in list(_active_connections.items()):
         try:
-            await client.disconnect()
+            # Bound each disconnect so an unreachable server can't hang shutdown.
+            await asyncio.wait_for(client.disconnect(), timeout=5.0)
         except Exception as exc:
             logger.debug("Error disconnecting server %s on shutdown: %s", server_id, exc)
 
+    # Close pooled remote MCP connections used by tool invocations.
+    from app.core.protocol.connection_pool import remote_connection_pool
+
+    await remote_connection_pool.aclose_all()
+
     from app.core.http_client import aclose_http_client
+
     await aclose_http_client()
 
     from app.core.runtime.threadpool import shutdown_threadpool
+
     shutdown_threadpool()
 
     from app.cache.redis_client import close_redis_pool
+
     await close_redis_pool()
 
     logger.info("Grafux-mcp shutdown complete")
@@ -131,6 +150,7 @@ async def _periodic_s3_sync() -> None:
     await asyncio.sleep(60)  # Brief delay so startup sync doesn't overlap
     from app.core.runtime.local_runner import s3_syncer
     from app.core.runtime.threadpool import run_in_threadpool
+
     while True:
         try:
             await asyncio.sleep(settings.s3_sync_interval)
@@ -143,6 +163,7 @@ async def _periodic_s3_sync() -> None:
 
 
 # ── Application factory ───────────────────────────────────────────────────────
+
 
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -187,6 +208,7 @@ def create_app() -> FastAPI:
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception):
         from app.core.errors import tool_error
+
         logger.exception("Unhandled error on %s: %s", request.url.path, exc)
         return JSONResponse(
             status_code=500,
@@ -226,6 +248,7 @@ def create_app() -> FastAPI:
 
     # Legacy pre-v1 endpoints for the Qt/WASM clients (/health, /api/tools, ...)
     from app.api.legacy import router as legacy_router
+
     app.include_router(legacy_router)
 
     # ── Root endpoint (backward compat with v1 /  response) ──────────────────

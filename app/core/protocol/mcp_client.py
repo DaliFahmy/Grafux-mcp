@@ -48,7 +48,9 @@ class MCPClientWrapper:
             logger.warning("MCP SDK not installed — using HTTP fallback for %s", self.endpoint_url)
             return await self._http_probe()
         except Exception as exc:
-            raise ConnectionError(f"Failed to connect to MCP server {self.endpoint_url}: {exc}") from exc
+            raise ConnectionError(
+                f"Failed to connect to MCP server {self.endpoint_url}: {exc}"
+            ) from exc
 
     async def list_tools(self) -> list[dict[str, Any]]:
         """Discover all tools from the connected MCP server."""
@@ -77,8 +79,7 @@ class MCPClientWrapper:
                 result = await session.call_tool(name, arguments)
                 return {
                     "content": [
-                        {"type": c.type, "text": getattr(c, "text", str(c))}
-                        for c in result.content
+                        {"type": c.type, "text": getattr(c, "text", str(c))} for c in result.content
                     ],
                     "isError": result.isError if hasattr(result, "isError") else False,
                 }
@@ -101,9 +102,13 @@ class MCPClientWrapper:
     # ── HTTP fallback (when MCP SDK not available or server uses REST) ────────
 
     async def _http_probe(self) -> dict[str, Any]:
+        from app.config import settings
         from app.core.http_client import get_http_client
+
         try:
-            resp = await get_http_client().get(f"{self.endpoint_url}/", timeout=10.0)
+            resp = await get_http_client().get(
+                f"{self.endpoint_url}/", timeout=settings.remote_probe_timeout
+            )
             if resp.status_code < 300:
                 data = resp.json()
                 return {"name": data.get("service", "unknown"), "version": "?", "capabilities": {}}
@@ -112,18 +117,24 @@ class MCPClientWrapper:
         return {"name": "unknown", "version": "?", "capabilities": {}}
 
     async def _http_list_tools(self) -> list[dict[str, Any]]:
+        from app.config import settings
         from app.core.http_client import get_http_client
-        resp = await get_http_client().get(f"{self.endpoint_url}/api/tools", timeout=10.0)
+
+        resp = await get_http_client().get(
+            f"{self.endpoint_url}/api/tools", timeout=settings.remote_probe_timeout
+        )
         resp.raise_for_status()
         data = resp.json()
         return data.get("tools", [])
 
     async def _http_call_tool(self, name: str, arguments: dict) -> dict[str, Any]:
+        from app.config import settings
         from app.core.http_client import get_http_client
+
         resp = await get_http_client().post(
             f"{self.endpoint_url}/api/tools/{name}",
             json={"arguments": arguments},
-            timeout=60.0,
+            timeout=settings.remote_call_timeout,
         )
         resp.raise_for_status()
         return resp.json()

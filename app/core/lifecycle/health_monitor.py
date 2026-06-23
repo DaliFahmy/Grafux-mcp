@@ -48,6 +48,15 @@ class HealthMonitor:
                 await self._check_all()
             except Exception as exc:
                 logger.error("HealthMonitor error: %s", exc)
+            # Reuse this loop to close idle pooled invocation connections, so no
+            # extra background task is needed.
+            try:
+                from app.config import settings
+                from app.core.protocol.connection_pool import remote_connection_pool
+
+                await remote_connection_pool.evict_idle(settings.remote_pool_idle_seconds)
+            except Exception as exc:
+                logger.debug("Pool idle-eviction error: %s", exc)
             await asyncio.sleep(_POLL_INTERVAL)
 
     async def _check_all(self) -> None:
